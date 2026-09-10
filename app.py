@@ -327,17 +327,35 @@ jobs:
             '{repo_owner: $repo_owner, repo_name: $repo_name, issue_number: ($issue_number|tonumber), issue_title: $issue_title, issue_body: $issue_body, trigger_source: $trigger_source, issue_author: $issue_author, comment_author: $comment_author, hit_trigger_word: $hit_word, all_comments: $all_comments}')
 
           echo "POST $URL"
-          CODE=$(curl -sS -o resp.txt -w "%{http_code}" -X POST "$URL" \\
+          CODE=$(curl -sS -L --post301 --post302 --post303 -o resp.txt -w "%{http_code}" -X POST "$URL" \\
             -H "Content-Type: application/json" \\
             -H "Authorization: Bearer $WEBHOOK_SECRET" \\
             -d "$PAYLOAD")
           echo "HTTP $CODE"
           cat resp.txt
-          if [ "$CODE" -ge 400 ]; then
-            echo "::error::服务端返回 $CODE，请回到控制台重新生成并提交 workflow（地址与密钥已写死在文件中）"
+          if [ "$CODE" -lt 200 ] || [ "$CODE" -ge 300 ]; then
+            echo "::error::服务端返回 $CODE（地址 $URL），请回到控制台重新生成并提交 workflow"
             exit 1
           fi
 """
+
+
+def _public_base() -> str:
+    """推断写进 workflow 的对外服务地址。
+
+    优先 PUBLIC_BASE_URL；否则用反向代理传的 X-Forwarded-Proto / X-Forwarded-Host；
+    两者都没有时，非本机主机默认按 https 处理（TLS 通常终止在 nginx 上，Flask 只看到 http）。
+    """
+    configured = (os.getenv("PUBLIC_BASE_URL") or "").strip()
+    if configured:
+        return configured.rstrip("/")
+    proto = (request.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip()
+    host = (request.headers.get("X-Forwarded-Host") or request.host or "").split(",")[0].strip()
+    if not proto:
+        hostname = host.split(":")[0]
+        is_local = hostname in ("localhost", "127.0.0.1") or hostname.startswith(("192.168.", "10.", "172."))
+        proto = request.scheme if is_local else "https"
+    return f"{proto}://{host}".rstrip("/")
 
 
 @app.route("/api/repo/workflow", methods=["POST"])
@@ -345,7 +363,7 @@ def repo_workflow():
     """生成该仓库绑定对应的 GitHub Actions workflow 内容。
 
     服务端地址与签名密钥直接写死在文件里（无需再配置仓库 Secrets）：
-    - WEBHOOK_URL = PUBLIC_BASE_URL（或当前请求的 host）+ /api/Github/Issue
+    - WEBHOOK_URL = PUBLIC_BASE_URL（或按请求推断的对外地址）+ /api/Github/Issue
     - WEBHOOK_SECRET = 服务端 .env 的 WEBHOOK_SECRET
     """
     user = _auth_or_abort()
@@ -359,7 +377,7 @@ def repo_workflow():
     except Exception:
         pass
     keyword_js = "[" + ",".join(json.dumps(k, ensure_ascii=False) for k in keywords) + "]"
-    public_base = (os.getenv("PUBLIC_BASE_URL") or request.host_url or "").rstrip("/")
+    public_base = _public_base()
     webhook_url = f"{public_base}/api/Github/Issue"
     webhook_secret = os.getenv("WEBHOOK_SECRET", "")
 
