@@ -1,0 +1,166 @@
+body {
+  background: rgb(10 10 10);
+  width: 100%;
+  margin: 0;
+  position: relative;
+  min-height: 100vh;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+header{
+  height: 50px;
+  width: 100%;
+  background: rgb(170 170 170 / 0.7);
+  display: flex;
+  align-items: center;
+  white-space: nowrap;
+  gap: 8px;
+}
+
+a {
+  color: white;
+  font-size: 30px;
+  text-decoration: none;
+}
+.menu {
+  margin-left: 15px;
+  margin-right: 20px;
+  width: 300px;
+}
+
+
+#TitleAndLogo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 100%;
+  white-space: nowrap;
+}
+
+#logo{
+  padding-top: 5px;
+  padding-left: 10px;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+}
+
+#title {
+  white-space: nowrap;
+  margin: 0;
+  color: white;
+  font-size: 35px;
+}
+
+footer {
+  background: rgb(170 170 170 / 0.7);
+  gap: 30px;
+  margin-top: auto;
+}
+
+
+.footer-menu {
+  min-height: 50px;
+  width: 100%;
+  background: rgb(170 170 170 / 0);
+  display: flex;
+  gap: 30px;
+}
+
+
+#footer-logo {
+  padding-top: 5px;
+  padding-left: 10px;
+  width: 50px;
+  height: 50px;
+  flex-shrink: 0;
+  margin-left: 20px;
+}
+
+footer .footer-ol a{
+  font-size: 20px;
+  color: black
+}
+
+#C-logo {
+  width: 100%;
+  text-align: center;
+}
+
+
+
+
+
+
+
+
+
+
+#page-main {
+  margin:50px;
+}
+
+#page-main hr {
+  width: 100%;
+}
+
+
+
+
+/* Home页背景图容器：在文档流中(跟随滚动)，但自身不占高度(不占用文档流空间) */
+#HomeBackgroundImg {
+  position: relative;
+  height: 0;
+}
+
+/* 每张图片占一个屏幕大小，绝对定位脱离文档流，垫在文字内容之下 */
+#HomeBackgroundImg * {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100vh;
+  object-fit: cover;
+  z-index: -1;
+}
+
+#HomeBackgroundImg img:nth-child(2) {
+  top: 100vh;
+}
+
+/* 每个文字区块占一个屏幕大小 */
+.HomePart {
+  height: 100vh;
+}
+
+/* 向下翻页浮钮 */
+.scroll-down {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border: none;
+  background: rgb(255 255 255 / 0.15);
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 10;
+}
+
+.scroll-down:hover {
+  background: rgb(255 255 255 / 0.3);
+}
+
+.scroll-down svg {
+  width: 24px;
+  height: 24px;
+}

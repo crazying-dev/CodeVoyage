@@ -1,0 +1,16 @@
+/* 引入谷歌马善政字体 */
+@import url('https://fonts.googleapis.com/css2?family=Ma+Shan+Zheng&display=swap');
+
+/* 自定义手写字体 OriginalHandWrite */
+@font-face {
+    font-family: 'OriginalHandWrite';
+    src:
+            url('https://assets.crazying-dev.top/font/CEFFontsCJK.woff2') format('woff2'),
+            url('https://ciallovo.top/assets/fonts/CEFFontsCJK.woff2') format('woff2');
+    font-weight: normal;
+    font-style: normal;
+    font-display: swap;
+}
+* {
+    font-family: 'OriginalHandWrite', 'Ma Shan Zheng', sans‑serif;
+}
