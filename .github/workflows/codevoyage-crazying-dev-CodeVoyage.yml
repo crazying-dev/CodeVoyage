@@ -15,7 +15,7 @@ jobs:
       - name: set key list
         id: trigger_words
         env:
-          KEYWORDS_JSON: "[\"AI Run\"]"
+          KEYWORDS_JSON: "[\"Ai Run\"]"
         run: |
           echo "trigger_list=$KEYWORDS_JSON" >> $GITHUB_OUTPUT
 
@@ -110,8 +110,8 @@ jobs:
       - name: push info with POST
         if: steps.match_keyword.outputs.hit == 'true'
         env:
-          WEBHOOK_URL: "http://codevoyage.yjlt.top/api/Github/Issue"
-          WEBHOOK_SECRET: ""
+          WEBHOOK_URL: "https://codevoyage.yjlt.top/api/Github/Issue"
+          WEBHOOK_SECRET: "Lmg120615"
           REPO_OWNER: ${{ steps.extract.outputs.repo_owner }}
           REPO_NAME: ${{ steps.extract.outputs.repo_name }}
           ISSUE_NUMBER: ${{ steps.extract.outputs.issue_number }}
@@ -147,13 +147,13 @@ jobs:
             '{repo_owner: $repo_owner, repo_name: $repo_name, issue_number: ($issue_number|tonumber), issue_title: $issue_title, issue_body: $issue_body, trigger_source: $trigger_source, issue_author: $issue_author, comment_author: $comment_author, hit_trigger_word: $hit_word, all_comments: $all_comments}')
 
           echo "POST $URL"
-          CODE=$(curl -sS -o resp.txt -w "%{http_code}" -X POST "$URL" \
+          CODE=$(curl -sS -L --post301 --post302 --post303 -o resp.txt -w "%{http_code}" -X POST "$URL" \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $WEBHOOK_SECRET" \
             -d "$PAYLOAD")
           echo "HTTP $CODE"
           cat resp.txt
-          if [ "$CODE" -ge 400 ]; then
-            echo "::error::服务端返回 $CODE，请回到控制台重新生成并提交 workflow（地址与密钥已写死在文件中）"
+          if [ "$CODE" -lt 200 ] || [ "$CODE" -ge 300 ]; then
+            echo "::error::服务端返回 $CODE（地址 $URL），请回到控制台重新生成并提交 workflow"
             exit 1
           fi
