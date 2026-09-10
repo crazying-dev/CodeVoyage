@@ -194,41 +194,54 @@ jobs:
     steps:
       - name: set key list
         id: trigger_words
+        env:
+          KEYWORDS_JSON: __KEYWORDS__
         run: |
-          TRIGGER_WORDS='__KEYWORDS__'
-          echo "trigger_list=$TRIGGER_WORDS" >> $GITHUB_OUTPUT
+          echo "trigger_list=$KEYWORDS_JSON" >> $GITHUB_OUTPUT
 
       - name: collect issue info
         id: extract
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          FULL_REPOSITORY: ${{ github.repository }}
+          REPO_OWNER_IN: ${{ github.repository_owner }}
+          ISSUE_NUMBER_IN: ${{ github.event.issue.number }}
+          ISSUE_TITLE_IN: ${{ github.event.issue.title }}
+          ISSUE_BODY_IN: ${{ github.event.issue.body }}
+          ISSUE_AUTHOR_IN: ${{ github.event.issue.user.login }}
+          COMMENT_BODY_IN: ${{ github.event.comment.body }}
+          COMMENT_AUTHOR_IN: ${{ github.event.comment.user.login }}
         run: |
-          REPO_OWNER=${{ github.repository_owner }}
-          REPO_NAME=$(echo ${{ github.repository }} | cut -d '/' -f2)
-          ISSUE_NUMBER=${{ github.event.issue.number }}
-          ISSUE_TITLE=${{ github.event.issue.title }}
-          ISSUE_BODY=${{ github.event.issue.body }}
-          ISSUE_AUTHOR=${{ github.event.issue.user.login }}
-          if [[ "${{ github.event_name }}" == "issue_comment" ]]; then
-            TRIGGER_CONTENT="${{ github.event.comment.body }}"
+          REPO_OWNER="$REPO_OWNER_IN"
+          REPO_NAME="${FULL_REPOSITORY#*/}"
+          ISSUE_NUMBER="${ISSUE_NUMBER_IN:-0}"
+          ISSUE_TITLE="$ISSUE_TITLE_IN"
+          ISSUE_BODY="$ISSUE_BODY_IN"
+          ISSUE_AUTHOR="$ISSUE_AUTHOR_IN"
+          if [ "$EVENT_NAME" = "issue_comment" ]; then
+            TRIGGER_CONTENT="$COMMENT_BODY_IN"
             TRIGGER_SOURCE="comment"
-            COMMENT_AUTHOR=${{ github.event.comment.user.login }}
+            COMMENT_AUTHOR="$COMMENT_AUTHOR_IN"
           else
-            TRIGGER_CONTENT="${{ github.event.issue.title }} ${{ github.event.issue.body }}"
+            TRIGGER_CONTENT="$ISSUE_TITLE_IN $ISSUE_BODY_IN"
             TRIGGER_SOURCE="issue"
             COMMENT_AUTHOR=""
           fi
-          echo "repo_owner=$REPO_OWNER" >> $GITHUB_OUTPUT
-          echo "repo_name=$REPO_NAME" >> $GITHUB_OUTPUT
-          echo "issue_number=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
-          echo "issue_title=$ISSUE_TITLE" >> $GITHUB_OUTPUT
-          echo "issue_author=$ISSUE_AUTHOR" >> $GITHUB_OUTPUT
-          echo "comment_author=$COMMENT_AUTHOR" >> $GITHUB_OUTPUT
-          echo "issue_body<<EOF" >> $GITHUB_OUTPUT
-          echo "$ISSUE_BODY" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-          echo "trigger_content<<EOF" >> $GITHUB_OUTPUT
-          echo "$TRIGGER_CONTENT" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-          echo "trigger_source=$TRIGGER_SOURCE" >> $GITHUB_OUTPUT
+          {
+            echo "repo_owner=$REPO_OWNER"
+            echo "repo_name=$REPO_NAME"
+            echo "issue_number=$ISSUE_NUMBER"
+            echo "issue_title=$ISSUE_TITLE"
+            echo "issue_author=$ISSUE_AUTHOR"
+            echo "comment_author=$COMMENT_AUTHOR"
+            echo "trigger_source=$TRIGGER_SOURCE"
+            echo "issue_body<<CV_EOF"
+            echo "$ISSUE_BODY"
+            echo "CV_EOF"
+            echo "trigger_content<<CV_EOF"
+            echo "$TRIGGER_CONTENT"
+            echo "CV_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: warn when no keywords
         if: steps.trigger_words.outputs.trigger_list == '[]'
@@ -279,6 +292,16 @@ jobs:
         env:
           WEBHOOK_URL: __WEBHOOK_URL__
           WEBHOOK_SECRET: __WEBHOOK_SECRET__
+          REPO_OWNER: ${{ steps.extract.outputs.repo_owner }}
+          REPO_NAME: ${{ steps.extract.outputs.repo_name }}
+          ISSUE_NUMBER: ${{ steps.extract.outputs.issue_number }}
+          ISSUE_TITLE: ${{ steps.extract.outputs.issue_title }}
+          ISSUE_BODY: ${{ steps.extract.outputs.issue_body }}
+          TRIGGER_SOURCE: ${{ steps.extract.outputs.trigger_source }}
+          ISSUE_AUTHOR: ${{ steps.extract.outputs.issue_author }}
+          COMMENT_AUTHOR: ${{ steps.extract.outputs.comment_author }}
+          HIT_WORD: ${{ steps.match_keyword.outputs.hit_word }}
+          ALL_COMMENTS: ${{ steps.fetch_all_comments.outputs.comments_json }}
         run: |
           if [ -z "$WEBHOOK_URL" ]; then
             echo "::error::服务端地址为空，请重新在控制台生成并提交 workflow"
@@ -291,16 +314,16 @@ jobs:
           esac
 
           PAYLOAD=$(jq -n \\
-            --arg repo_owner "${{ steps.extract.outputs.repo_owner }}" \\
-            --arg repo_name "${{ steps.extract.outputs.repo_name }}" \\
-            --arg issue_number "${{ steps.extract.outputs.issue_number }}" \\
-            --arg issue_title "${{ steps.extract.outputs.issue_title }}" \\
-            --arg issue_body "${{ steps.extract.outputs.issue_body }}" \\
-            --arg trigger_source "${{ steps.extract.outputs.trigger_source }}" \\
-            --arg issue_author "${{ steps.extract.outputs.issue_author }}" \\
-            --arg comment_author "${{ steps.extract.outputs.comment_author }}" \\
-            --arg hit_word "${{ steps.match_keyword.outputs.hit_word }}" \\
-            --argjson all_comments '${{ steps.fetch_all_comments.outputs.comments_json }}' \\
+            --arg repo_owner "$REPO_OWNER" \\
+            --arg repo_name "$REPO_NAME" \\
+            --arg issue_number "${ISSUE_NUMBER:-0}" \\
+            --arg issue_title "$ISSUE_TITLE" \\
+            --arg issue_body "$ISSUE_BODY" \\
+            --arg trigger_source "$TRIGGER_SOURCE" \\
+            --arg issue_author "$ISSUE_AUTHOR" \\
+            --arg comment_author "$COMMENT_AUTHOR" \\
+            --arg hit_word "$HIT_WORD" \\
+            --argjson all_comments "${ALL_COMMENTS:-[]}" \\
             '{repo_owner: $repo_owner, repo_name: $repo_name, issue_number: ($issue_number|tonumber), issue_title: $issue_title, issue_body: $issue_body, trigger_source: $trigger_source, issue_author: $issue_author, comment_author: $comment_author, hit_trigger_word: $hit_word, all_comments: $all_comments}')
 
           echo "POST $URL"
@@ -336,13 +359,12 @@ def repo_workflow():
     except Exception:
         pass
     keyword_js = "[" + ",".join(json.dumps(k, ensure_ascii=False) for k in keywords) + "]"
-
     public_base = (os.getenv("PUBLIC_BASE_URL") or request.host_url or "").rstrip("/")
     webhook_url = f"{public_base}/api/Github/Issue"
     webhook_secret = os.getenv("WEBHOOK_SECRET", "")
 
-    yaml_text = WORKFLOW_TEMPLATE.replace("__KEYWORDS__", keyword_js)
     # 用 JSON 字符串形式写入，保证 YAML 转义安全
+    yaml_text = WORKFLOW_TEMPLATE.replace("__KEYWORDS__", json.dumps(keyword_js, ensure_ascii=False))
     yaml_text = yaml_text.replace("__WEBHOOK_URL__", json.dumps(webhook_url, ensure_ascii=False))
     yaml_text = yaml_text.replace("__WEBHOOK_SECRET__", json.dumps(webhook_secret, ensure_ascii=False))
 
