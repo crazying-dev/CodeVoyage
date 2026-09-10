@@ -230,34 +230,41 @@ jobs:
           echo "EOF" >> $GITHUB_OUTPUT
           echo "trigger_source=$TRIGGER_SOURCE" >> $GITHUB_OUTPUT
 
+      - name: warn when no keywords
+        if: steps.trigger_words.outputs.trigger_list == '[]'
+        run: echo "::warning::未配置触发关键词，CodeVoyage 不会触发；请到控制台重新生成 workflow"
+
       - name: find keyword
         id: match_keyword
+        env:
+          TRIGGER_LIST: ${{ steps.trigger_words.outputs.trigger_list }}
+          TRIGGER_CONTENT: ${{ steps.extract.outputs.trigger_content }}
         uses: actions/github-script@v7
         with:
           script: |
-            const triggerList = ${{ steps.trigger_words.outputs.trigger_list }};
-            const content = `${{ steps.extract.outputs.trigger_content }}`;
-            let hitWord = null;
-            for (const w of triggerList) {
-              if (content.includes(w)) { hitWord = w; break; }
+            const list = JSON.parse(process.env.TRIGGER_LIST || '[]');
+            const content = process.env.TRIGGER_CONTENT || '';
+            let hit = null;
+            for (const w of list) {
+              if (w && content.includes(w)) { hit = w; break; }
             }
-            if (hitWord) {
-              core.setOutput("hit", "true");
-              core.setOutput("hit_word", hitWord);
-            } else {
-              core.setOutput("hit", "false");
-            }
+            core.setOutput('hit', hit ? 'true' : 'false');
+            core.setOutput('hit_word', hit || '');
 
       - name: collect comments
         id: fetch_all_comments
         if: steps.match_keyword.outputs.hit == 'true'
+        env:
+          REPO_OWNER: ${{ steps.extract.outputs.repo_owner }}
+          REPO_NAME: ${{ steps.extract.outputs.repo_name }}
+          ISSUE_NUMBER: ${{ steps.extract.outputs.issue_number }}
         uses: actions/github-script@v7
         with:
           script: |
             const { data: comments } = await github.rest.issues.listComments({
-              owner: '${{ steps.extract.outputs.repo_owner }}',
-              repo: '${{ steps.extract.outputs.repo_name }}',
-              issue_number: ${{ steps.extract.outputs.issue_number }}
+              owner: process.env.REPO_OWNER,
+              repo: process.env.REPO_NAME,
+              issue_number: Number(process.env.ISSUE_NUMBER)
             });
             const simplified = comments.map(c => ({
               user: c.user?.login,
@@ -265,14 +272,24 @@ jobs:
               html_url: c.html_url,
               created_at: c.created_at
             }));
-            core.setOutput("comments_json", JSON.stringify(simplified));
+            core.setOutput('comments_json', JSON.stringify(simplified));
 
       - name: push info with POST
         if: steps.match_keyword.outputs.hit == 'true'
         env:
-          WEBHOOK_URL: ${{ secrets.BACKEND_WEBHOOK_URL }}
-          WEBHOOK_SECRET: ${{ secrets.BACKEND_WEBHOOK_SECRET }}
+          WEBHOOK_URL: __WEBHOOK_URL__
+          WEBHOOK_SECRET: __WEBHOOK_SECRET__
         run: |
+          if [ -z "$WEBHOOK_URL" ]; then
+            echo "::error::服务端地址为空，请重新在控制台生成并提交 workflow"
+            exit 1
+          fi
+          URL="$WEBHOOK_URL"
+          case "$URL" in
+            */api/Github/Issue) ;;
+            *) URL="${URL%/}/api/Github/Issue" ;;
+          esac
+
           PAYLOAD=$(jq -n \\
             --arg repo_owner "${{ steps.extract.outputs.repo_owner }}" \\
             --arg repo_name "${{ steps.extract.outputs.repo_name }}" \\
@@ -286,16 +303,28 @@ jobs:
             --argjson all_comments '${{ steps.fetch_all_comments.outputs.comments_json }}' \\
             '{repo_owner: $repo_owner, repo_name: $repo_name, issue_number: ($issue_number|tonumber), issue_title: $issue_title, issue_body: $issue_body, trigger_source: $trigger_source, issue_author: $issue_author, comment_author: $comment_author, hit_trigger_word: $hit_word, all_comments: $all_comments}')
 
-          curl -sS -X POST "$WEBHOOK_URL" \\
+          echo "POST $URL"
+          CODE=$(curl -sS -o resp.txt -w "%{http_code}" -X POST "$URL" \\
             -H "Content-Type: application/json" \\
             -H "Authorization: Bearer $WEBHOOK_SECRET" \\
-            -d "$PAYLOAD"
+            -d "$PAYLOAD")
+          echo "HTTP $CODE"
+          cat resp.txt
+          if [ "$CODE" -ge 400 ]; then
+            echo "::error::服务端返回 $CODE，请回到控制台重新生成并提交 workflow（地址与密钥已写死在文件中）"
+            exit 1
+          fi
 """
 
 
 @app.route("/api/repo/workflow", methods=["POST"])
 def repo_workflow():
-    """生成该仓库绑定对应的 GitHub Actions workflow 内容。"""
+    """生成该仓库绑定对应的 GitHub Actions workflow 内容。
+
+    服务端地址与签名密钥直接写死在文件里（无需再配置仓库 Secrets）：
+    - WEBHOOK_URL = PUBLIC_BASE_URL（或当前请求的 host）+ /api/Github/Issue
+    - WEBHOOK_SECRET = 服务端 .env 的 WEBHOOK_SECRET
+    """
     user = _auth_or_abort()
     data = request.get_json(silent=True) or {}
     binding = database.get_binding_by_id(data.get("id")) if data.get("id") else None
@@ -307,12 +336,24 @@ def repo_workflow():
     except Exception:
         pass
     keyword_js = "[" + ",".join(json.dumps(k, ensure_ascii=False) for k in keywords) + "]"
+
+    public_base = (os.getenv("PUBLIC_BASE_URL") or request.host_url or "").rstrip("/")
+    webhook_url = f"{public_base}/api/Github/Issue"
+    webhook_secret = os.getenv("WEBHOOK_SECRET", "")
+
     yaml_text = WORKFLOW_TEMPLATE.replace("__KEYWORDS__", keyword_js)
+    # 用 JSON 字符串形式写入，保证 YAML 转义安全
+    yaml_text = yaml_text.replace("__WEBHOOK_URL__", json.dumps(webhook_url, ensure_ascii=False))
+    yaml_text = yaml_text.replace("__WEBHOOK_SECRET__", json.dumps(webhook_secret, ensure_ascii=False))
+
     filename = f"codevoyage-{binding['owner']}-{binding['name']}.yml"
     return app.response_class(
         yaml_text,
         mimetype="text/plain",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-CodeVoyage-Webhook-URL": webhook_url,
+        },
     )
 
 
