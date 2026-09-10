@@ -15,7 +15,7 @@ jobs:
       - name: set key list
         id: trigger_words
         env:
-          KEYWORDS_JSON: "[\"AI Run\"]"
+          KEYWORDS_JSON: "[\"Ai Run\"]"
         run: |
           echo "trigger_list=$KEYWORDS_JSON" >> $GITHUB_OUTPUT
 
@@ -111,7 +111,7 @@ jobs:
         if: steps.match_keyword.outputs.hit == 'true'
         env:
           WEBHOOK_URL: "http://codevoyage.yjlt.top/api/Github/Issue"
-          WEBHOOK_SECRET: ""
+          WEBHOOK_SECRET: "Lmg120615"
           REPO_OWNER: ${{ steps.extract.outputs.repo_owner }}
           REPO_NAME: ${{ steps.extract.outputs.repo_name }}
           ISSUE_NUMBER: ${{ steps.extract.outputs.issue_number }}
