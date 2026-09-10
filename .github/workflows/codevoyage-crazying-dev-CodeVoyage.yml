@@ -15,7 +15,7 @@ jobs:
       - name: set key list
         id: trigger_words
         run: |
-          TRIGGER_WORDS='["@AI"]'
+          TRIGGER_WORDS='["AI Run"]'
           echo "trigger_list=$TRIGGER_WORDS" >> $GITHUB_OUTPUT
 
       - name: collect issue info
