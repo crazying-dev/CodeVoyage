@@ -1,8 +1,8 @@
 """远端调用封装（本地代理）。
 
-本地 centre 对远端服务（默认 https://CodeVoyage.yjlt.top，可用 centre.json 的 remote
-或环境变量 REMOTE_BASE 覆盖）发起请求。账号/仓库绑定/记录等数据以远端为主，
-本模块负责在请求体中自动附带本地保存的 ID + token。
+远端地址已写死为现有部署（centre.paths.REMOTE_DEFAULT = https://CodeVoyage.yjlt.top），
+仅在特殊场景下可用环境变量 CODEVOYAGE_REMOTE 覆盖。
+账号/仓库绑定/记录等数据以远端为主，本模块负责在请求体中自动附带本地保存的 ID + token。
 """
 import json
 

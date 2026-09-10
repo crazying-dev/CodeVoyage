@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onActivated, onDeactivated, ref } from 'vue'
 import { postJSON, getJSON } from '../api'
 import { state } from '../store'
 
@@ -63,19 +63,23 @@ function remain(t: Task): number {
   return Math.max(0, Math.ceil(t.confirm_due - now.value / 1000))
 }
 
-onMounted(() => {
+onActivated(() => {
   refresh()
   timer = window.setInterval(refresh, 2000)
   ticker = window.setInterval(() => (now.value = Date.now()), 1000)
 })
 
-onUnmounted(() => {
+onDeactivated(() => {
   if (timer) clearInterval(timer)
   if (ticker) clearInterval(ticker)
+  timer = null
+  ticker = null
 })
 </script>
 
 <template>
+  <div v-if="!data && !err" class="panel muted">正在加载 Agent 状态…</div>
+  <div v-if="!data && err" class="alert">{{ err }}</div>
   <div class="overview" v-if="data">
     <div class="card-grid">
       <div class="panel stat">

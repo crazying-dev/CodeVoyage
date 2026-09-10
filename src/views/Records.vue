@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onActivated, ref } from 'vue'
 import { postJSON } from '../api'
 
 interface Record {
@@ -43,7 +43,7 @@ function stateText(s: string): string {
   return map[s] || s
 }
 
-onMounted(refresh)
+onActivated(refresh)
 </script>
 
 <template>

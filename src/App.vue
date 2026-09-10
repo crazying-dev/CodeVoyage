@@ -34,6 +34,10 @@ async function doLogout() {
   </header>
   <main class="page">
     <RouterView />
+    <p class="app-hint">
+      本页面只是控制台界面：关闭浏览器标签不会停止后台运行（GetIssue / Agent / 5431 服务仍在工作）。
+      退出请用控制台右上角「退出客户端」，或系统托盘的「退出」。
+    </p>
   </main>
 </template>
 
@@ -83,5 +87,14 @@ button.ghost {
   padding: 22px;
   max-width: 1180px;
   margin: 0 auto;
+}
+
+.app-hint {
+  margin-top: 24px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.7;
 }
 </style>

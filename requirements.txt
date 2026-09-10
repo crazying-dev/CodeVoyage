@@ -2,3 +2,5 @@ flask
 requests
 pygithub
 openai
+pystray
+Pillow

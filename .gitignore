@@ -191,6 +191,7 @@ frontend/dist/
 node_modules/
 /dist/
 .cache-npm/
+.codevoyage-local/
 
 \...*
 data/

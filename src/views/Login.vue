@@ -2,7 +2,6 @@
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { login, register, state, loadStatus, isLoggedIn } from '../store'
-import { postJSON } from '../api'
 
 const router = useRouter()
 const mode = ref<'login' | 'register'>('login')
@@ -13,14 +12,10 @@ const busy = ref(false)
 const errMsg = ref('')
 const okMsg = ref('')
 
-const remoteOpen = ref(false)
-const remoteUrl = ref('')
-const savingRemote = ref(false)
-
 onMounted(async () => {
   if (!state.loaded) await loadStatus()
   if (isLoggedIn()) router.replace('/console')
-  remoteUrl.value = state.status?.remote || ''
+  if (state.error) errMsg.value = state.error
 })
 
 async function submit() {
@@ -53,21 +48,6 @@ async function submit() {
     busy.value = false
   }
 }
-
-async function saveRemote() {
-  savingRemote.value = true
-  errMsg.value = ''
-  try {
-    const j = await postJSON<{ remote: string }>('/api/remote/set', { remote: remoteUrl.value })
-    remoteUrl.value = j.remote
-    state.status && (state.status.remote = j.remote)
-    okMsg.value = '远端服务地址已更新'
-  } catch (e: any) {
-    errMsg.value = e?.message || '保存失败'
-  } finally {
-    savingRemote.value = false
-  }
-}
 </script>
 
 <template>
@@ -97,14 +77,7 @@ async function saveRemote() {
         {{ busy ? '处理中…' : mode === 'login' ? '登录' : '注册并登录' }}
       </button>
 
-      <div class="remote-box">
-        <button class="link" @click="remoteOpen = !remoteOpen">远端服务设置（当前：{{ remoteUrl || '未设置' }}）</button>
-        <div v-if="remoteOpen" class="remote-inner">
-          <input v-model.trim="remoteUrl" placeholder="https://CodeVoyage.yjlt.top" />
-          <button :disabled="savingRemote" @click="saveRemote">保存</button>
-          <p class="hint">本地开发可将远端指向本机：http://127.0.0.1:5000</p>
-        </div>
-      </div>
+      <p class="hint">远端服务地址已固定，无需配置；本地存储路径可在控制台「本地配置」页查看。</p>
     </div>
   </div>
 </template>
@@ -153,28 +126,5 @@ button.full {
 .ok {
   color: var(--ok);
   font-size: 13px;
-}
-
-.remote-box {
-  margin-top: 14px;
-  border-top: 1px dashed var(--border);
-  padding-top: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-button.link {
-  background: none;
-  border: none;
-  padding: 0;
-  color: var(--accent);
-  text-align: left;
-  font-size: 12px;
-}
-
-.remote-inner {
-  display: flex;
-  gap: 8px;
 }
 </style>

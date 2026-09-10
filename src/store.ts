@@ -6,9 +6,18 @@ export interface UserStatus {
   logged_in: boolean
   email: string
   remote: string
+  storage_dir: string
+  storage_source: string
   github_configured: boolean
+  github_tokens?: string[]
+  github_token_count?: number
+  github_token_hint: string
   llm_configured: boolean
+  llm_api_key_hint: string
+  llm_base_url: string
   llm_model: string
+  git_name: string
+  git_email: string
 }
 
 export const state = reactive<{
@@ -20,6 +29,9 @@ export const state = reactive<{
   loaded: false,
   error: '',
 })
+
+/** 控制台当前页签（跨组件共享，便于从其它页面跳转） */
+export const ui = reactive<{ tab: string }>({ tab: 'overview' })
 
 export async function loadStatus() {
   try {

@@ -24,6 +24,8 @@ def register(app):
             conf = remote.login((data.get("email") or "").strip(), data.get("password") or "")
         except remote.RemoteError as e:
             return jsonify({"message": e.message}), e.code
+        except paths.StorageError as e:
+            return jsonify({"message": str(e)}), 500
         except Exception as e:
             return jsonify({"message": f"无法连接远端服务：{e}"}), 502
         return jsonify({"message": "OK", "email": conf["email"], "ID": conf["ID"]})
@@ -35,6 +37,8 @@ def register(app):
             conf = remote.register((data.get("email") or "").strip(), data.get("password") or "")
         except remote.RemoteError as e:
             return jsonify({"message": e.message}), e.code
+        except paths.StorageError as e:
+            return jsonify({"message": str(e)}), 500
         except Exception as e:
             return jsonify({"message": f"无法连接远端服务：{e}"}), 502
         return jsonify({"message": "OK", "email": conf["email"], "ID": conf["ID"]})
@@ -48,24 +52,49 @@ def register(app):
     def user_status():
         conf = paths.load_user_conf()
         local = paths.load_local_conf()
+        global_tokens = paths.load_global_tokens()
         return jsonify({
             "message": "OK",
             "logged_in": bool(conf),
             "email": (conf or {}).get("email", ""),
             "remote": paths.remote_base(),
-            "github_configured": bool(local.get("github_token")),
+            "storage_dir": paths.BASE_DIR,
+            "storage_source": paths.BASE_SOURCE,
+            "github_configured": bool(global_tokens),
+            "github_tokens": paths.token_hint_list(global_tokens),
+            "github_token_count": len(global_tokens),
+            "github_token_hint": paths.mask(global_tokens[0]) if global_tokens else "",
             "llm_configured": bool(local.get("llm_api_key")),
+            "llm_api_key_hint": paths.mask(local.get("llm_api_key")),
+            "llm_base_url": local.get("llm_base_url") or "",
             "llm_model": local.get("llm_model") or "",
+            "git_name": paths.git_identity()[0],
+            "git_email": paths.git_identity()[1],
         })
 
-    @app.route("/api/remote/set", methods=["POST"])
-    def remote_set():
-        data = request.get_json(silent=True) or {}
-        url = (data.get("remote") or "").strip()
-        if not url.startswith(("http://", "https://")):
-            return jsonify({"message": "remote 地址需以 http(s):// 开头"}), 400
-        paths.set_remote_base(url)
-        return jsonify({"message": "OK", "remote": paths.remote_base()})
+    # ---------------------------------------------------------------
+    # 本地诊断：存储路径/可写性/文件落地情况 + 登录态有效性
+    # ---------------------------------------------------------------
+    @app.route("/api/local/diagnostics", methods=["GET", "POST"])
+    def local_diagnostics():
+        conf = paths.load_user_conf()
+        session = {"checked": False, "valid": False, "reason": ""}
+        if conf:
+            try:
+                remote.call("/api/user/info", {}, timeout=15)
+                session = {"checked": True, "valid": True, "reason": ""}
+            except remote.RemoteError as e:
+                session = {"checked": True, "valid": False, "reason": f"远端拒绝（{e.code}）：{e.message}"}
+            except Exception as e:
+                session = {"checked": False, "valid": False, "reason": f"无法连接远端：{e}"}
+        return jsonify({
+            "message": "OK",
+            "remote": paths.remote_base(),
+            "logged_in": bool(conf),
+            "session": session,
+            "storage": paths.storage_info(),
+            "agent": core.get_state(),
+        })
 
     # ---------------------------------------------------------------
     # 远端数据代理
@@ -86,7 +115,7 @@ def register(app):
         return Response(resp.content, status=resp.status_code, mimetype="text/plain",
                         headers={"Content-Disposition": resp.headers.get("Content-Disposition", "")})
 
-    for endpoint in ("/api/repo/list", "/api/repo/bind", "/api/repo/update",
+    for endpoint in ("/api/repo/bind", "/api/repo/update",
                      "/api/repo/unbind", "/api/repo/workflow", "/api/records", "/api/user/info"):
         def make_view(ep=endpoint):
             def view():
@@ -95,8 +124,93 @@ def register(app):
         app.add_url_rule(endpoint, endpoint=f"proxy_{endpoint.strip('/').replace('/', '_')}",
                          view_func=make_view(), methods=["POST"])
 
+    # 仓库列表：远端数据 + 本地令牌绑定情况（细粒度令牌按仓库保存）
+    @app.route("/api/repo/list", methods=["POST"])
+    def repo_list_annotated():
+        try:
+            resp = remote.call("/api/repo/list", request.get_json(silent=True) or {}, raw=True)
+        except Exception as e:
+            return jsonify({"message": f"远端请求失败：{e}"}), 502
+        try:
+            body = resp.json()
+        except ValueError:
+            return jsonify({"message": resp.text or "unknown"}), resp.status_code
+        if resp.status_code >= 400:
+            return jsonify(body), resp.status_code
+        global_tokens = paths.load_global_tokens()
+        repo_tokens = paths.load_repo_tokens_map()
+        for r in body.get("repos", []):
+            repo_full = f"{r.get('owner', '')}/{r.get('name', '')}"
+            repo_list = repo_tokens.get(repo_full, [])
+            r["repo_token_hints"] = paths.token_hint_list(repo_list)
+            r["has_repo_token"] = bool(repo_list)
+            r["repo_token_hint"] = paths.mask(repo_list[0]) if repo_list else ""
+            r["token_source"] = "repo" if repo_list else ("global" if global_tokens else "")
+            r["token_count"] = len(repo_list) + (0 if repo_list else len(global_tokens))
+            r["global_token_count"] = len(global_tokens)
+        return jsonify(body), resp.status_code
+
     # ---------------------------------------------------------------
-    # 仓库检查器：workflow 是否已安装（本地 GitHub PAT 调用，Key 不出本机）
+    # 全局令牌列表（传统，支持多个并存，顺序即回退尝试顺序）
+    # ---------------------------------------------------------------
+    @app.route("/api/local/tokens", methods=["POST"])
+    def global_tokens_manage():
+        data = request.get_json(silent=True) or {}
+        action = (data.get("action") or "add").strip()
+        if action == "add":
+            token = (data.get("token") or "").strip()
+            if not token:
+                return jsonify({"message": "token missing"}), 400
+            tokens = paths.add_global_token(token)
+        elif action == "remove":
+            tokens = paths.remove_global_token(index=data.get("index"), token=data.get("token"))
+        elif action == "clear":
+            paths.save_global_tokens([])
+            tokens = []
+        elif action == "move":
+            tokens = paths.move_global_token(int(data.get("index", 0)), int(data.get("delta", 0)))
+        else:
+            return jsonify({"message": "unknown action"}), 400
+        return jsonify({
+            "message": "OK",
+            "github_tokens": paths.token_hint_list(tokens),
+            "github_token_count": len(tokens),
+            "github_configured": bool(tokens),
+        })
+
+    # ---------------------------------------------------------------
+    # 仓库专属令牌（细粒度，支持多个并存）：绑定/编辑仓库时维护
+    # ---------------------------------------------------------------
+    @app.route("/api/local/repo-token", methods=["POST"])
+    def repo_token_manage():
+        data = request.get_json(silent=True) or {}
+        owner = (data.get("owner") or "").strip()
+        name = (data.get("name") or "").strip()
+        if not owner or not name:
+            return jsonify({"message": "owner or name missing"}), 400
+        repo_full = f"{owner}/{name}"
+        action = (data.get("action") or ("clear" if data.get("clear") else "add")).strip()
+        if action == "add":
+            token = (data.get("token") or "").strip()
+            if not token:
+                return jsonify({"message": "token missing"}), 400
+            paths.add_repo_token(repo_full, token)
+        elif action == "remove":
+            paths.remove_repo_token(repo_full, index=data.get("index"), token=data.get("token"))
+        elif action == "clear":
+            paths.clear_repo_token(repo_full)
+        else:
+            return jsonify({"message": "unknown action"}), 400
+        tokens = paths.load_repo_tokens(repo_full)
+        return jsonify({
+            "message": "OK",
+            "has_repo_token": bool(tokens),
+            "repo_token_hints": paths.token_hint_list(tokens),
+            "repo_token_hint": paths.mask(tokens[0]) if tokens else "",
+        })
+
+    # ---------------------------------------------------------------
+    # 仓库检查器：workflow 是否已安装（本地令牌调用，Token 不出本机）
     # ---------------------------------------------------------------
     @app.route("/api/repo/check-workflow", methods=["POST"])
     def check_workflow():
@@ -105,34 +219,51 @@ def register(app):
         name = (data.get("name") or "").strip()
         if not owner or not name:
             return jsonify({"message": "owner or name missing"}), 400
-        token = (paths.load_local_conf().get("github_token") or "").strip()
-        if not token:
+        repo_full = f"{owner}/{name}"
+        candidates = paths.resolve_tokens(repo_full)
+        if not candidates:
             return jsonify({
                 "message": "OK", "installed": False, "up_to_date": False, "file": "",
-                "files": [], "reason": "未配置 GitHub Token（本地配置），无法检查仓库",
+                "files": [], "token_source": "", "tried": 0,
+                "reason": "未配置令牌（可在仓库绑定页填写细粒度令牌，或在本地配置填写传统令牌）",
             })
         try:
             from GithubTool import user as gh_user
-
-            res = gh_user.list_workflows(token, f"{owner}/{name}")
         except Exception as e:
+            return jsonify({"message": "OK", "installed": False, "up_to_date": False, "file": "",
+                            "files": [], "token_source": "", "tried": 0,
+                            "reason": f"GitHub 组件不可用：{e}"})
+        last_reason = ""
+        last_source = candidates[-1][1]
+        tried = 0
+        for token, source in candidates:
+            tried += 1
+            last_source = source
+            res = gh_user.list_workflows(token, repo_full)
+            if res.get("retryable"):
+                last_reason = res.get("reason", "")
+                continue  # 换下一个令牌重试
+            files = res.get("files", [])
+            matched = next((f for f in files if f.get("is_codevoyage")), None)
             return jsonify({
-                "message": "OK", "installed": False, "up_to_date": False, "file": "",
-                "files": [], "reason": f"检查失败：{e}",
+                "message": "OK",
+                "installed": bool(matched),
+                "up_to_date": bool(matched and matched.get("has_author_check")),
+                "file": matched["name"] if matched else "",
+                "files": files,
+                "token_source": source,
+                "tried": tried,
+                "reason": res.get("reason", ""),
             })
-        files = res.get("files", [])
-        matched = next((f for f in files if f.get("is_codevoyage")), None)
         return jsonify({
-            "message": "OK",
-            "installed": bool(matched),
-            "up_to_date": bool(matched and matched.get("has_author_check")),
-            "file": matched["name"] if matched else "",
-            "files": files,
-            "reason": res.get("reason", ""),
+            "message": "OK", "installed": False, "up_to_date": False, "file": "",
+            "files": [], "token_source": last_source, "tried": tried,
+            "reason": f"已尝试 {tried} 个令牌均失败：{last_reason}",
         })
 
     # ---------------------------------------------------------------
-    # 一键安装：本地提交 workflow 文件并发起 PR（PAT 不出本机）
+    # 一键安装：本地提交 workflow 文件并发起 PR（令牌不出本机）
+    # 优先使用该仓库绑定的细粒度令牌，否则回退全局传统令牌
     # ---------------------------------------------------------------
     @app.route("/api/repo/install-workflow", methods=["POST"])
     def install_workflow():
@@ -142,11 +273,8 @@ def register(app):
         bind_id = data.get("id")
         if not owner or not name or not bind_id:
             return jsonify({"message": "owner/name/id missing"}), 400
-        token = (paths.load_local_conf().get("github_token") or "").strip()
-        if not token:
-            return jsonify({"message": "OK", "ok": False,
-                            "reason": "未配置 GitHub Token（本地配置），无法提交 PR"})
-        # 1) 取远端生成的 workflow 文本（以绑定的关键词/白名单为准）
+        token_candidates = paths.resolve_tokens(f"{owner}/{name}")
+        # 1) 取远端生成的 workflow 文本（以绑定的关键词/白名单为准，无需令牌）
         try:
             resp = remote.call("/api/repo/workflow", {"id": bind_id}, raw=True)
         except Exception as e:
@@ -160,16 +288,50 @@ def register(app):
         if m:
             filename = m.group(1)
         path = f".github/workflows/{filename}"
-        # 2) 建分支提交并发起 PR
+
+        # 2) 没有令牌：无法用 API 建 PR（GitHub 强制鉴权），给出网页提交方案（效果等同 PR）
+        if not token_candidates:
+            return jsonify({
+                "message": "OK", "ok": False, "token_source": "", "tried": 0,
+                "reason": "该仓库没有可用令牌，无法通过 API 创建 PR（GitHub 要求鉴权）。可改用网页提交，效果等同。",
+                "fallback": {
+                    "filename": filename,
+                    "path": path,
+                    "content": content,
+                    "repo_url": f"https://github.com/{owner}/{name}",
+                    "new_file_urls": [
+                        f"https://github.com/{owner}/{name}/new/main?filename={path}",
+                        f"https://github.com/{owner}/{name}/new/master?filename={path}",
+                    ],
+                },
+            })
+
+        # 3) 依次尝试各令牌，第一个成功即返回（提交身份取本地配置的提交邮箱）
         try:
             from GithubTool import user as gh_user
-
-            res = gh_user.commit_workflow_pr(token, f"{owner}/{name}", path, content)
         except Exception as e:
-            return jsonify({"message": "OK", "ok": False, "reason": f"创建 PR 失败：{e}"})
+            return jsonify({"message": "OK", "ok": False, "reason": f"GitHub 组件不可用：{e}"})
+        git_name, git_email = paths.git_identity()
+        errors = []
+        for index, (token, source) in enumerate(token_candidates, start=1):
+            try:
+                res = gh_user.commit_workflow_pr(
+                    token, f"{owner}/{name}", path, content,
+                    author_name=git_name, author_email=git_email,
+                )
+            except Exception as e:
+                errors.append(f"第 {index} 个令牌（{source}）：{e}")
+                continue
+            return jsonify({
+                "message": "OK", "ok": True, "pr_url": res["pr_url"], "branch": res["branch"],
+                "filename": filename, "path": path, "existed": res["existed"],
+                "token_source": source, "tried": index, "author_email": git_email,
+                "steps": res.get("steps", []),
+            })
         return jsonify({
-            "message": "OK", "ok": True, "pr_url": res["pr_url"], "branch": res["branch"],
-            "filename": filename, "path": path, "existed": res["existed"],
+            "message": "OK", "ok": False, "token_source": token_candidates[-1][1],
+            "tried": len(token_candidates),
+            "reason": "已尝试全部令牌均失败：\n" + "\n".join(errors),
         })
 
     # ---------------------------------------------------------------
@@ -178,17 +340,115 @@ def register(app):
     @app.route("/api/local/config", methods=["POST"])
     def local_config_save():
         data = request.get_json(silent=True) or {}
-        allowed = {"github_token", "llm_api_key", "llm_base_url", "llm_model"}
-        update = {k: str(v) for k, v in data.items() if k in allowed}
-        current = paths.load_local_conf()
-        current.update(update)
-        paths.save_local_conf(current)
+        allowed = {"llm_api_key", "llm_base_url", "llm_model", "git_name", "git_email"}
+        # 兼容旧字段：github_token 追加到令牌列表；clear 里的 github_token 视为清空列表
+        clear_keys = [k for k in (data.get("clear") or []) if k in allowed or k == "github_token"]
+        if "github_token" in clear_keys:
+            paths.save_global_tokens([])
+        if clear_keys:
+            paths.clear_local_conf([k for k in clear_keys if k in allowed])
+        new_token = (data.get("github_token") or "").strip()
+        if new_token:
+            paths.add_global_token(new_token)
+        update = {k: str(v) for k, v in data.items() if k in allowed and v is not None}
+        if update:
+            paths.save_local_conf(update)  # 增量合并写入，避免覆盖其它键
+        local = paths.load_local_conf()
+        global_tokens = paths.load_global_tokens()
         return jsonify({
             "message": "OK",
-            "github_configured": bool(current.get("github_token")),
-            "llm_configured": bool(current.get("llm_api_key")),
-            "llm_model": current.get("llm_model") or "",
+            "github_configured": bool(global_tokens),
+            "github_tokens": paths.token_hint_list(global_tokens),
+            "github_token_count": len(global_tokens),
+            "github_token_hint": paths.mask(global_tokens[0]) if global_tokens else "",
+            "llm_configured": bool(local.get("llm_api_key")),
+            "llm_api_key_hint": paths.mask(local.get("llm_api_key")),
+            "llm_base_url": local.get("llm_base_url") or "",
+            "llm_model": local.get("llm_model") or "",
+            "git_name": paths.git_identity()[0],
+            "git_email": paths.git_identity()[1],
         })
+
+    # ---------------------------------------------------------------
+    # 本地 GitHub 状态：校验令牌（传统/细粒度）+ 指定仓库权限
+    # ---------------------------------------------------------------
+    @app.route("/api/local/github-status", methods=["POST"])
+    def github_status():
+        data = request.get_json(silent=True) or {}
+        owner = (data.get("owner") or "").strip()
+        name = (data.get("name") or "").strip()
+        if owner and name:
+            candidates = paths.resolve_tokens(f"{owner}/{name}")
+        else:
+            candidates = [(t, "global") for t in paths.load_global_tokens()]
+        if not candidates:
+            return jsonify({"message": "OK", "configured": False, "ok": False, "kind": "", "login": "",
+                            "scopes": [], "hints": [], "repo": None, "token_source": "",
+                            "token_count": 0, "tried": 0,
+                            "reason": "未配置令牌：可在「仓库绑定」填写细粒度令牌，或在「本地配置」填写传统令牌"})
+        try:
+            from GithubTool import user as gh_user
+        except Exception as e:
+            return jsonify({"message": "OK", "configured": True, "ok": False, "kind": "", "login": "",
+                            "scopes": [], "hints": [], "repo": None, "token_source": candidates[0][1],
+                            "token_count": len(candidates), "tried": 0,
+                            "reason": f"GitHub 组件不可用：{e}"})
+
+        last_payload = None
+        for index, (token, source) in enumerate(candidates, start=1):
+            info = gh_user.describe_token(token)
+            payload = {
+                "message": "OK",
+                "configured": True,
+                "ok": info["ok"],
+                "kind": info["kind"],
+                "login": info.get("login", ""),
+                "scopes": info.get("scopes", []),
+                "hints": gh_user.TOKEN_HINTS.get(info["kind"], []),
+                "repo": None,
+                "token_source": source,
+                "token_count": len(candidates),
+                "tried": index,
+                "reason": info.get("reason", ""),
+            }
+            if not info["ok"]:
+                last_payload = payload
+                continue  # 换下一个令牌
+            if owner and name:
+                access = gh_user.repo_access(token, f"{owner}/{name}")
+                payload["repo"] = access
+                if not access.get("ok"):
+                    payload["reason"] = access.get("reason", "")
+                    last_payload = payload
+                    if access.get("retryable"):
+                        continue  # 该令牌看不到这个仓库，尝试下一个
+                    return jsonify(payload)
+            return jsonify(payload)
+        if last_payload is not None:
+            return jsonify(last_payload)
+        return jsonify({"message": "OK", "configured": True, "ok": False, "kind": "", "login": "",
+                        "scopes": [], "hints": [], "repo": None, "token_source": "",
+                        "token_count": len(candidates), "tried": len(candidates),
+                        "reason": "已尝试全部令牌均失败"})
+
+    # ---------------------------------------------------------------
+    # 退出客户端（仅允许本机调用）
+    # ---------------------------------------------------------------
+    @app.route("/api/agent/shutdown", methods=["POST"])
+    def agent_shutdown():
+        addr = (request.remote_addr or "").strip()
+        if addr not in ("127.0.0.1", "::1", "localhost"):
+            return jsonify({"message": "only local allowed"}), 403
+        import os as _os
+        import threading
+
+        paths.append_log("收到退出请求，客户端即将关闭")
+
+        def _exit():
+            _os._exit(0)
+
+        threading.Timer(0.6, _exit).start()
+        return jsonify({"message": "OK", "detail": "客户端正在关闭"})
 
     # ---------------------------------------------------------------
     # GetIssue 组件上报（远端 -> GetIssue 组件 -> 5431 入库）

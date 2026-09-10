@@ -60,9 +60,16 @@ def main():
         except Exception as e:
             if task:
                 uid = task["uuid"]
-                core.finish(uid, "failed", error=str(e))
-                paths.append_log(f"任务失败 {task.get('repo_full', '')}#{task.get('issue_number', '')}: {e}")
-                _report(uid, "Failed", error=str(e))
+                err_text = str(e)
+                if any(k in err_text for k in ("Permission", "permission", "403", "denied", "Authentication")):
+                    err_text += (
+                        "\n提示：请检查 GitHub Token 权限。"
+                        "传统令牌需勾选 repo（改 workflow 还需 workflow）；"
+                        "细粒度令牌需勾选该仓库并授予 Contents / Pull requests / Workflows 读写。"
+                    )
+                core.finish(uid, "failed", error=err_text)
+                paths.append_log(f"任务失败 {task.get('repo_full', '')}#{task.get('issue_number', '')}: {err_text}")
+                _report(uid, "Failed", error=err_text)
             time.sleep(1)
 
 

@@ -12,7 +12,6 @@ LLM Key 与 GitHub PAT 均从本地配置读取（~/.CodeVoyage/local.json，混
 """
 import json
 import os
-import shutil
 
 import config
 import Info
@@ -90,27 +89,44 @@ def _build_issue_prompt(task: dict) -> str:
 def run_task(task: dict) -> dict:
     """执行单个 Issue 任务，返回 {status, pr_url, conclusion}。异常以 AgentError 抛出。"""
     local = paths.load_local_conf()
-    gh_token = (local.get("github_token") or "").strip()
-    if not gh_token:
-        raise AgentError("未配置 GitHub Token，无法克隆/推送仓库，请在控制台「本地配置」中填写")
+    repo_full = task["repo_full"]
+    # 候选令牌（顺序即尝试顺序）：仓库专属（细粒度）→ 全局（传统）
+    token_candidates = paths.resolve_tokens(repo_full)
+    if not token_candidates:
+        raise AgentError(
+            f"仓库 {repo_full} 没有可用令牌：请在「仓库绑定」页填写该仓库的细粒度令牌，"
+            "或在「本地配置」页填写全局传统令牌"
+        )
     if not (local.get("llm_api_key") or "").strip():
         raise AgentError("未配置 LLM API Key，请在控制台「本地配置」中填写")
 
-    repo_full = task["repo_full"]
     issue_number = task.get("issue_number")
     branch = f"codevoyage/issue-{issue_number}-{task.get('uuid', '')[:6]}"
     dest = os.path.join(paths.repo_dir(repo_full), "work", task.get("uuid", "run"))
 
     core.set_activity({"running_uuid": task.get("uuid", ""), "status": "running", "note": "克隆仓库"})
-    paths.append_log(f"[{repo_full}#{issue_number}] 克隆仓库")
     os.makedirs(os.path.dirname(dest), exist_ok=True)
 
     from tools import GitRepo, ReadFile
 
     try:
-        if os.path.isdir(dest):
-            shutil.rmtree(dest, ignore_errors=True)
-        GitRepo.clone(repo_full, gh_token, dest)
+        # 依次尝试各令牌克隆，第一个成功即采用
+        gh_token, token_source, clone_error = "", "", None
+        for idx, (cand_token, cand_source) in enumerate(token_candidates, start=1):
+            GitRepo.remove_dir(dest)
+            try:
+                GitRepo.clone(repo_full, cand_token, dest)
+                gh_token, token_source = cand_token, cand_source
+                paths.append_log(
+                    f"[{repo_full}#{issue_number}] 克隆成功（第 {idx} 个令牌，来源 "
+                    f"{'仓库专属/细粒度' if cand_source == 'repo' else '全局/传统'}）"
+                )
+                break
+            except Exception as e:
+                clone_error = e
+                paths.append_log(f"[{repo_full}#{issue_number}] 第 {idx} 个令牌克隆失败：{e}")
+        if not gh_token:
+            raise AgentError(f"全部 {len(token_candidates)} 个令牌都无法克隆仓库：{clone_error}")
 
         default = ""
         try:
@@ -178,7 +194,8 @@ def run_task(task: dict) -> dict:
         pr_body = final_content
 
         core.set_activity({"note": "git 提交并推送"})
-        GitRepo.commit_all(dest, commit_message)
+        git_name, git_email = paths.git_identity()
+        GitRepo.commit_all(dest, commit_message, name=git_name, email=git_email)
         GitRepo.push(dest, repo_full, gh_token, branch)
 
         from GithubTool import user as gh_user
@@ -188,7 +205,7 @@ def run_task(task: dict) -> dict:
         return {"status": "ok", "pr_url": pr_url, "conclusion": conclusion}
     finally:
         # 成功/失败都清理临时克隆，避免磁盘膨胀
-        shutil.rmtree(dest, ignore_errors=True)
+        GitRepo.remove_dir(dest)
         ReadFile.set_workspace("")
 
 
