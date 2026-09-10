@@ -148,6 +148,7 @@ def _ddl(engine: str) -> list:
             name       TEXT    NOT NULL,
             user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             keywords   TEXT    NOT NULL DEFAULT '[]',
+            authors    TEXT    NOT NULL DEFAULT '[]',
             created_at TEXT    NOT NULL,
             UNIQUE(owner, name)
         )""",
@@ -179,6 +180,19 @@ def init_db() -> None:
     engine, _ = _db_setting()
     with _conn() as conn:
         conn.executescript(_ddl(engine))
+        _migrate(conn, engine)
+
+
+def _migrate(conn, engine: str) -> None:
+    """老库升级：为 repos 补充 authors 列（已存在时忽略）。"""
+    if engine == "postgres":
+        # postgres 事务中一条语句失败会污染整个事务，使用 IF NOT EXISTS 避免报错
+        conn.execute("ALTER TABLE repos ADD COLUMN IF NOT EXISTS authors TEXT NOT NULL DEFAULT '[]'")
+        return
+    try:
+        conn.execute("ALTER TABLE repos ADD COLUMN authors TEXT NOT NULL DEFAULT '[]'")
+    except Exception:
+        pass
 
 
 # ------------------------------ 用户 ------------------------------
@@ -235,16 +249,21 @@ def check_user(uid, token) -> dict | None:
 
 
 # ------------------------------ 仓库绑定 ------------------------------
-def create_repo_binding(owner: str, name: str, user_id: int, keywords: list) -> dict | None:
+def create_repo_binding(owner: str, name: str, user_id: int, keywords: list, authors: list | None = None) -> dict | None:
     owner = (owner or "").strip()
     name = (name or "").strip()
     if not owner or not name:
         return None
     with _conn() as conn:
         row = conn.execute(
-            "INSERT INTO repos(owner, name, user_id, keywords, created_at)"
-            " VALUES(?,?,?,?,?) RETURNING id",
-            (owner, name, user_id, json.dumps(keywords or [], ensure_ascii=False), _now()),
+            "INSERT INTO repos(owner, name, user_id, keywords, authors, created_at)"
+            " VALUES(?,?,?,?,?,?) RETURNING id",
+            (
+                owner, name, user_id,
+                json.dumps(keywords or [], ensure_ascii=False),
+                json.dumps(authors or [], ensure_ascii=False),
+                _now(),
+            ),
         ).fetchone()
         if not row:
             return None  # 唯一约束冲突 -> 已绑定
@@ -270,12 +289,23 @@ def list_repos(user_id: int) -> list:
         ).fetchall()
 
 
-def update_repo_keywords(bid: int, keywords: list) -> bool:
+def update_repo_keywords(bid: int, keywords: list, authors: list | None = None) -> bool:
+    """更新关键词；authors 传 None 表示不改动白名单。"""
     with _conn() as conn:
-        cur = conn.execute(
-            "UPDATE repos SET keywords=? WHERE id=?",
-            (json.dumps(keywords or [], ensure_ascii=False), bid),
-        )
+        if authors is None:
+            cur = conn.execute(
+                "UPDATE repos SET keywords=? WHERE id=?",
+                (json.dumps(keywords or [], ensure_ascii=False), bid),
+            )
+        else:
+            cur = conn.execute(
+                "UPDATE repos SET keywords=?, authors=? WHERE id=?",
+                (
+                    json.dumps(keywords or [], ensure_ascii=False),
+                    json.dumps(authors or [], ensure_ascii=False),
+                    bid,
+                ),
+            )
         return cur.rowcount > 0
 
 

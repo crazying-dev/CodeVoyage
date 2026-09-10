@@ -89,17 +89,29 @@ def user_info():
 # ==================================================================
 #  仓库绑定 / 关键词 / workflow
 # ==================================================================
+def _as_list(value, strip_at: bool = False) -> list:
+    """把 keywords/authors 统一解析成去空字符串列表；authors 允许带 @ 前缀。"""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except Exception:
+            value = value.replace("，", ",").split(",")
+    out = []
+    for v in (value or []):
+        item = str(v).strip()
+        if strip_at:
+            item = item.lstrip("@")
+        if item:
+            out.append(item)
+    return out
+
+
 def _parse_repo_payload(data):
     owner = (data.get("owner") or data.get("repo_owner") or "").strip().lstrip("@")
     name = (data.get("name") or data.get("repo_name") or "").strip()
-    keywords = data.get("keywords")
-    if isinstance(keywords, str):
-        try:
-            keywords = json.loads(keywords)
-        except Exception:
-            keywords = [k for k in keywords.replace("，", ",").split(",") if k.strip()]
-    keywords = [str(k).strip() for k in (keywords or []) if str(k).strip()]
-    return owner, name, keywords
+    keywords = _as_list(data.get("keywords"))
+    authors = _as_list(data.get("authors"), strip_at=True)
+    return owner, name, keywords, authors
 
 
 def _repo_dict(r: dict) -> dict:
@@ -107,6 +119,10 @@ def _repo_dict(r: dict) -> dict:
         r["keywords"] = json.loads(r.pop("keywords"))
     except Exception:
         r["keywords"] = []
+    try:
+        r["authors"] = json.loads(r.pop("authors"))
+    except Exception:
+        r["authors"] = []
     return r
 
 
@@ -122,16 +138,16 @@ def repo_list():
 @app.route("/api/repo/bind", methods=["POST"])
 def repo_bind():
     user = _auth_or_abort()
-    owner, name, keywords = _parse_repo_payload(request.get_json(silent=True) or {})
+    owner, name, keywords, authors = _parse_repo_payload(request.get_json(silent=True) or {})
     if not owner or not name:
         return _fail("owner or name missing")
     existed = database.get_binding_by_repo(owner, name)
     if existed and existed["user_id"] != user["id"]:
         return _fail("repo already bound by another user", 409)
-    if existed:  # 同用户重复绑定视为更新关键词
-        database.update_repo_keywords(existed["id"], keywords)
+    if existed:  # 同用户重复绑定视为更新关键词与白名单
+        database.update_repo_keywords(existed["id"], keywords, authors)
         return _ok({"message": "OK", "id": existed["id"]})
-    binding = database.create_repo_binding(owner, name, user["id"], keywords)
+    binding = database.create_repo_binding(owner, name, user["id"], keywords, authors)
     if not binding:
         return _fail("repo already bound", 409)
     return _ok({"message": "OK", "id": binding["id"]})
@@ -144,8 +160,8 @@ def repo_update():
     binding = database.get_binding_by_id(data.get("id")) if data.get("id") else None
     if not binding or binding["user_id"] != user["id"]:
         return _fail("binding not found", 404)
-    _, _, keywords = _parse_repo_payload(data)
-    database.update_repo_keywords(binding["id"], keywords)
+    _, _, keywords, authors = _parse_repo_payload(data)
+    database.update_repo_keywords(binding["id"], keywords, authors)
     return _ok({"message": "OK"})
 
 
@@ -190,17 +206,22 @@ jobs:
           ISSUE_NUMBER=${{ github.event.issue.number }}
           ISSUE_TITLE=${{ github.event.issue.title }}
           ISSUE_BODY=${{ github.event.issue.body }}
+          ISSUE_AUTHOR=${{ github.event.issue.user.login }}
           if [[ "${{ github.event_name }}" == "issue_comment" ]]; then
             TRIGGER_CONTENT="${{ github.event.comment.body }}"
             TRIGGER_SOURCE="comment"
+            COMMENT_AUTHOR=${{ github.event.comment.user.login }}
           else
             TRIGGER_CONTENT="${{ github.event.issue.title }} ${{ github.event.issue.body }}"
             TRIGGER_SOURCE="issue"
+            COMMENT_AUTHOR=""
           fi
           echo "repo_owner=$REPO_OWNER" >> $GITHUB_OUTPUT
           echo "repo_name=$REPO_NAME" >> $GITHUB_OUTPUT
           echo "issue_number=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
           echo "issue_title=$ISSUE_TITLE" >> $GITHUB_OUTPUT
+          echo "issue_author=$ISSUE_AUTHOR" >> $GITHUB_OUTPUT
+          echo "comment_author=$COMMENT_AUTHOR" >> $GITHUB_OUTPUT
           echo "issue_body<<EOF" >> $GITHUB_OUTPUT
           echo "$ISSUE_BODY" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
@@ -259,9 +280,11 @@ jobs:
             --arg issue_title "${{ steps.extract.outputs.issue_title }}" \\
             --arg issue_body "${{ steps.extract.outputs.issue_body }}" \\
             --arg trigger_source "${{ steps.extract.outputs.trigger_source }}" \\
+            --arg issue_author "${{ steps.extract.outputs.issue_author }}" \\
+            --arg comment_author "${{ steps.extract.outputs.comment_author }}" \\
             --arg hit_word "${{ steps.match_keyword.outputs.hit_word }}" \\
             --argjson all_comments '${{ steps.fetch_all_comments.outputs.comments_json }}' \\
-            '{repo_owner: $repo_owner, repo_name: $repo_name, issue_number: ($issue_number|tonumber), issue_title: $issue_title, issue_body: $issue_body, trigger_source: $trigger_source, hit_trigger_word: $hit_word, all_comments: $all_comments}')
+            '{repo_owner: $repo_owner, repo_name: $repo_name, issue_number: ($issue_number|tonumber), issue_title: $issue_title, issue_body: $issue_body, trigger_source: $trigger_source, issue_author: $issue_author, comment_author: $comment_author, hit_trigger_word: $hit_word, all_comments: $all_comments}')
 
           curl -sS -X POST "$WEBHOOK_URL" \\
             -H "Content-Type: application/json" \\
@@ -296,6 +319,24 @@ def repo_workflow():
 # ==================================================================
 #  GitHub Workflow 事件上报
 # ==================================================================
+def _normalize_login(value) -> str:
+    return str(value or "").strip().lstrip("@").lower()
+
+
+def _author_allowed(binding: dict, author) -> bool:
+    """触发者校验：白名单(authors) + 仓库 owner 允许；旧版 workflow 未携带作者时放行。"""
+    author = _normalize_login(author)
+    if not author:
+        return True
+    try:
+        allowed = json.loads(binding.get("authors") or "[]")
+    except Exception:
+        allowed = []
+    allowed_set = {_normalize_login(a) for a in allowed if str(a).strip()}
+    allowed_set.add(_normalize_login(binding.get("owner") or ""))
+    return author in allowed_set
+
+
 @app.route("/api/Github/Issue", methods=["POST"])
 def github_issue():
     data = request.get_json(silent=True) or {}
@@ -328,6 +369,10 @@ def github_issue():
         if not hit:
             return _ok({"message": "ignored: no keyword"})
         data["hit_trigger_word"] = hit
+    # 触发者身份校验：仅白名单用户或仓库 owner 可触发（缺 author 字段的旧版 workflow 放行）
+    author = data.get("comment_author") or data.get("issue_author")
+    if not _author_allowed(binding, author):
+        return _ok({"message": "ignored: author not allowed"})
     try:
         issue_number = int(data.get("issue_number"))
     except (TypeError, ValueError):
