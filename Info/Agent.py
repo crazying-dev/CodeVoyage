@@ -89,7 +89,7 @@ tools = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "message": {"type": "string", "description": "提交信息，一句话说明本次改动"}
+                    "message": {"type": "string", "description": "提交信息，一句话说明改动"}
                 },
                 "required": ["message"],
                 "additionalProperties": False,
@@ -112,6 +112,22 @@ tools = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "cleanup_branches",
+            "description": "查看或清理 CodeVoyage 工作分支（codevoyage/*）：PR 合并进默认分支后分支会被后台巡检自动销毁；此工具用于查看待清理队列或立即清理一次。只删已合并的工作分支，默认分支永不删除。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "run": {"type": "boolean", "description": "false（默认）只查看待清理队列；true 立即巡检并销毁已合并的工作分支"},
+                    "repo": {"type": "string", "description": "限定仓库 owner/name，留空表示本机全部仓库"},
+                },
+                "required": [],
+                "additionalProperties": False,
+            },
+        },
+    },
 ]
 
 # 名称到执行函数的映射（新增工具需同步登记）
@@ -124,4 +140,5 @@ tool_impl = {
     "create_branch": "RepoOps.create_branch",
     "commit_and_push": "RepoOps.commit_and_push",
     "create_pull_request": "RepoOps.create_pull_request",
+    "cleanup_branches": "BranchCleanup.cleanup_branches",
 }

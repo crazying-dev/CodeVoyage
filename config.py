@@ -13,4 +13,5 @@ AgentSystem = """
 10.所有文件读写修改类工具调用，必须对传入路径做强制校验，严格限制在工作区内部；检测到路径逃逸参数直接拒绝执行工具调用。
 11.仓库操作全部由你调用工具完成，标准顺序为：clone_repo（克隆，未克隆前不得读写任何文件）→ create_branch（建分支）→ 用 read_file/write_file 完成改动 → commit_and_push（提交并推送，message 用一句话说明改动）→ create_pull_request（建 PR）。不要跳步，不要臆造文件内容。
 12.工具返回以“错误：”开头时表示该步失败，请阅读原因后决定重试或如实汇报，不要谎报成功。
+13.工作分支的生命周期由程序负责收尾：你只创建分支（create_branch）并建 PR（create_pull_request）；PR 合并进仓库默认分支后，本次工作分支 codevoyage/* 会被后台巡检自动销毁。你不需要、也不允许尝试删除分支（尤其不得删除默认分支或非 codevoyage/* 分支）；如需查看待清理队列或立即清理，可调用 cleanup_branches（run=false 只查看，run=true 立即销毁已合并的工作分支）。
 """
