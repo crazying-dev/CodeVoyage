@@ -115,6 +115,42 @@ tools = [
     {
         "type": "function",
         "function": {
+            "name": "pr_conflicts",
+            "description": "只读查看 Pull Request 的冲突情况：不传 pr 时列出本仓库中与默认分支冲突的 open PR；传 pr（编号或链接）时给出该 PR 的 mergeable 状态、涉及文件与准入约束结论。不做任何修改。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pr": {"type": "string", "description": "PR 编号或链接，留空表示列出全部冲突中的 PR"},
+                    "repo": {"type": "string", "description": "仓库 owner/name，留空表示当前任务仓库"},
+                    "limit": {"type": "integer", "description": "列表最多返回多少个 PR，默认 10"},
+                },
+                "required": [],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "resolve_pr_conflicts",
+            "description": "自动解决 PR 与目标分支的冲突（会提交并推送到 PR 源分支，绝不 force push）：把目标分支 merge 进源分支，按策略解决冲突，校验无残留冲突标记后提交推送，并在 PR 下留言。只处理同仓库的 codevoyage/* 工作分支；工作区不干净、冲突过多过大或无法安全判定时一律回滚且不改动远端。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pr": {"type": "string", "description": "PR 编号或链接（必填）"},
+                    "strategy": {"type": "string", "description": "解决策略：auto（默认，只解决可安全判定的冲突）/ ours（保留源分支）/ theirs（保留目标分支）/ union（两边都保留）"},
+                    "dry_run": {"type": "boolean", "description": "true 时只输出计划，不改动任何内容"},
+                    "allow_foreign": {"type": "boolean", "description": "是否允许处理非 codevoyage/* 的源分支，默认 false（Fork 永不处理）"},
+                    "repo": {"type": "string", "description": "仓库 owner/name，留空表示当前任务仓库"},
+                },
+                "required": ["pr"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "cleanup_branches",
             "description": "查看或清理 CodeVoyage 工作分支（codevoyage/*）：PR 合并进默认分支后分支会被后台巡检自动销毁；此工具用于查看待清理队列或立即清理一次。只删已合并的工作分支，默认分支永不删除。",
             "parameters": {
@@ -140,5 +176,7 @@ tool_impl = {
     "create_branch": "RepoOps.create_branch",
     "commit_and_push": "RepoOps.commit_and_push",
     "create_pull_request": "RepoOps.create_pull_request",
+    "pr_conflicts": "PrOps.pr_conflicts",
+    "resolve_pr_conflicts": "PrOps.resolve_pr_conflicts",
     "cleanup_branches": "BranchCleanup.cleanup_branches",
 }

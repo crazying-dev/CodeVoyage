@@ -9,7 +9,10 @@
 6. git 提交并推送分支，调用 GitHub API 创建 Pull Request；
 7. 登记本次工作分支（centre.branch_gc）：PR 合并进默认分支后由后台巡检自动销毁，
    保证项目仓库的分支管理规范可维护（Issue #13）；
-8. 返回结果由上层回执给远端。
+8. PR 若与目标分支冲突（主分支在任务期间前进过），自动尝试解决一次
+   （centre.pr_conflict，Issue #19）：merge 目标分支 → 解决可安全判定的冲突 →
+   校验无残留标记 → 提交推送（绝不 force push）→ 在 PR 下留言；失败只记轨迹不影响任务；
+9. 返回结果由上层回执给远端。
 
 工作区安全：work 目录名由远端下发的任务 uuid 拼成，注入文件工具之前必须
 （1）用 `paths.safe_name` 清洗 uuid；（2）校验最终路径位于 `paths.REPO_DIR` 之内；
@@ -197,6 +200,10 @@ def run_task(task: dict) -> dict:
         # 只登记不删除，避免 PR 尚未合并时误删工作分支。
         branch_gc.register(repo_full, RepoOps.state().get("branch", ""), pr_url)
 
+        # PR 冲突自动处理（Issue #19）：主分支在本次任务期间前进过时，新 PR 会处于冲突状态，
+        # 这里由程序兜底解决一次，保证「PR 能合」。失败只记轨迹与日志，不影响任务结果。
+        _auto_resolve_pr_conflicts(repo_full, uid, dest, pr_url)
+
         paths.append_log(f"[{repo_full}#{issue_number}] 已完成，PR：{pr_url}")
         trace.finish(repo_full, uid, "ok")
         return {"status": "ok", "pr_url": pr_url, "conclusion": conclusion}
@@ -208,6 +215,27 @@ def run_task(task: dict) -> dict:
         # 成功/失败都清理临时克隆，避免磁盘膨胀
         GitRepo.remove_dir(dest)
         ReadFile.set_workspace("")
+
+
+def _auto_resolve_pr_conflicts(repo_full: str, uid: str, workdir: str, pr_url: str) -> None:
+    """PR 创建后自动处理与目标分支的冲突（Issue #19）。
+
+    只在 PR 确实冲突时动作：merge 目标分支 → 解决可安全判定的冲突 → 校验 → 提交推送
+    （绝不 force push）→ 在 PR 下留言。约束（同仓库 codevoyage/* 分支、文件数量/体积上限、
+    无法安全判定即回滚）都在 centre.pr_conflict 内实现；任何异常都不允许影响任务结果。
+    """
+    try:
+        from centre import pr_conflict
+
+        result = pr_conflict.resolve_pr(repo_full, workdir, pr_url, strategy="auto", comment=True)
+        text = pr_conflict.format_result(result)
+    except Exception as e:  # 自动处理绝不能把 Agent 主流程带崩
+        trace.append(repo_full, uid, {"type": "note", "content": f"PR 冲突自动处理异常：{e}"})
+        paths.append_log(f"[{repo_full}] PR 冲突自动处理异常：{e}")
+        return
+    trace.append(repo_full, uid, {"type": "note", "content": f"PR 冲突自动处理：\n{text}"})
+    first = next((line for line in text.splitlines() if line.strip()), "")
+    paths.append_log(f"[{repo_full}] PR 冲突自动处理：{first}")
 
 
 def _session_recap(history: dict) -> str:

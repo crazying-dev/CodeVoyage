@@ -2,7 +2,7 @@
 
 ---
 
-[![Stars](https://img.shields.io/github/stars/crazying-dev/CodeVoyage?style=flat&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZlcnNpb249IjEiIHdpZHRoPSIxNiIgaGVpZ2h0PSIxNiI%2bPHBhdGggZD0iTTggLjI1YS43NS43NSAwIDAgMSAuNjczLjQxOGwxLjg4MiAzLjgxNSA0LjIxLjYxMmEuNzUuNzUgMCAwIDEgLjQxNiAxLjI3OWwtMy4wNDYgMi45Ny43MTkgNC4xOTJhLjc1MS43NTEgMCAwIDEtMS4wODguNzkxTDggMTIuMzQ3bC0zLjc2NiAxLjk4YS43NS43NSAwIDAgMS0xLjA4OC0uNzlsLjcyLTQuMTk0TC44MTggNi4zNzRhLjc1Ljc1IDAgMCAxIC40MTYtMS4yOGw0LjIxLS42MTFMNy4zMjcuNjY4QS43NS43NSAwIDAgMSA4IC4yNVoiIGZpbGw9IiNlYWM1NGYiLz48L3N2Zz4%3d&logoSize=auto&label=Stars&labelColor=444444&color=eac54f)](https://github.com/crazying-dev/CodeVoyage)
+[![Stars](https://img.shields.io/github/stars/crazying-dev/CodeVoyage?style=flat&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZlcnNpb249IjEiIHdpZHRoPSIxNiIgaGVpZ2h0PSIxNiI%2bPHBhdGggZD0iTTggLjI1YS43NS43NSAwIDAgMSAuNjczLjQxOGwxLjg4MiAzLjgxNSA0LjIxLjYxMmEuNzUgMCAwIDEgLjQxNiAxLjI3OWwtMy4wNDYgMi45Ny43MTkgNC4xOTJhLjc1MS43NTEgMCAwIDEtMS4wODguNzkxTDggMTIuMzQ3bC0zLjc2NiAxLjk4YS43NS43NSAwIDAgMS0xLjA4OC0uNzlsLjcyLTQuMTk0TC44MTggNi4zNzRhLjc1Ljc1IDAgMCAxIC40MTYtMS4yOGw0LjIxLS42MTFMNy4zMjcuNjY4QS43NS43NSAwIDAgMSA4IC4yNVoiIGZpbGw9IiNlYWM1NGYiLz48L3N2Zz4%3d&logoSize=auto&label=Stars&labelColor=444444&color=eac54f)](https://github.com/crazying-dev/CodeVoyage)
 
 ---
 
@@ -30,6 +30,7 @@ CodeVoyage是一个通过[`Action Workflow`](https://docs.github.com/zh/actions)
 2. AI处理后的代码以[`Pull requests`](https://docs.github.com/en/rest/pulls)提交，全程更透明，不用担心AI发疯导致仓库损坏
 3. AI处理沙盒运行，不导致AI发疯导致电脑错误
 4. PR合并进主分支后，本次工作分支（`codevoyage/*`）会被自动销毁，仓库分支列表不会堆积
+5. PR若与主分支冲突（例如主分支在任务执行期间前进过），CodeVoyage会自动合并主分支并解决冲突，尽量让PR保持「可合并」
 
 ---
 
@@ -69,6 +70,28 @@ Agent服务循环获取最新任务，若获取到的任务的仓库未在执行
 4. 安全约束：只处理`codevoyage/*`前缀分支，默认分支（main/master等）与受保护分支永不删除；除队列外还会做一次兜底发现，清理历史遗留的已合并工作分支
 5. 手动查看或立即清理：调用`cleanup_branches`工具（`run=false`查看待清理队列，`run=true`立即销毁已合并的工作分支）
 
+PR冲突自动处理（见Issue #19）：
+1. **读PR**：`GithubTool/pulls.py` 提供 PR 列表、可合并状态（`mergeable` / `mergeable_state`）、
+   改动文件与「用 base 更新 head」等能力；`mergeable=False` 或 `mergeable_state=dirty` 即判定为冲突
+2. **处理PR**：`centre/pr_conflict.py` 负责把目标分支 `merge` 进 PR 源分支（**不用 rebase**），
+   逐个冲突文件按策略解决，然后提交并**普通推送**（绝不 force push），最后在 PR 下留言说明改了什么
+   - 解决策略：`auto`（默认，只解决可安全判定的冲突）/ `ours` / `theirs` / `union`
+   - `auto` 只处理「一侧为空（纯新增）」或「仅空白差异」的冲突块，其余不猜测，整体回滚交给人工
+3. **健壮约束**：只处理同仓库的 `codevoyage/*` 工作分支（Fork / 外部贡献者分支拒绝）；
+   只处理 open、未合并、目标为默认分支的 PR；冲突文件数量与单文件体积有上限；二进制冲突不自动解决；
+   工作区必须干净；解决后校验无残留冲突标记；任何失败都 `merge --abort` + `reset --hard` 回到处理前状态
+4. **自动触发**：任务创建 PR 后程序自动检查一次冲突并尝试解决（失败只记轨迹，不影响任务结果）；
+   AI 也可以主动调用工具处理其它 PR
+5. 手动使用：`pr_conflicts(pr="")` 查看冲突中的 PR；`pr_conflicts(pr=15)` 看单个 PR 详情；
+   `resolve_pr_conflicts(pr=15, dry_run=true)` 只看计划；确认后 `resolve_pr_conflicts(pr=15)` 执行
+
+触发关键词（Issue #19 评论）：
+- workflow 里的关键词匹配**不区分大小写、忽略多余空白**：`Ai Run` / `ai run` / `AI RUN` / `Ai  Run` 都能触发；
+- **不限制触发人身份**：任何对该 Issue 有评论权限的人（包括其他合规、维护人员）都可以用关键词唤起 CodeVoyage，
+  上报里会带上 `comment_author`，便于事后审计是谁触发的；
+- 关键词列表由服务端下发（控制台生成 workflow 时写入 `KEYWORDS_JSON`），本仓库模板见 `workflows/base.yaml`；
+  已安装的 workflow 需要重新生成（或在控制台重新提交）才能获得新的匹配规则。
+
 Agent的工具(每个工具都单独一个文件):
 1. Git仓库获取
 2. Issue内容获取
@@ -77,6 +100,8 @@ Agent的工具(每个工具都单独一个文件):
 5. 文件写入
 6. 文件读取
 7. 工作分支清理（`cleanup_branches`）
+8. PR冲突查看（`pr_conflicts`，只读）
+9. PR冲突处理（`resolve_pr_conflicts`）
 
 AI返回格式:
 1. 标准Markdown格式

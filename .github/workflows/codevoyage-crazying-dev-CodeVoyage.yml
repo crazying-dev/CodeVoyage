@@ -67,6 +67,11 @@ jobs:
         if: steps.trigger_words.outputs.trigger_list == '[]'
         run: echo "::warning::未配置触发关键词，CodeVoyage 不会触发；请到控制台重新生成 workflow"
 
+      # 关键词匹配规则（不限制触发人身份）：
+      # - 不区分大小写（Ai Run / ai run / AI RUN 都能触发）；
+      # - 忽略多余空白与换行（Ai  Run、Ai\nRun 也能触发）；
+      # - 只要评论/Issue 正文里出现过关键词即可，任何有评论权限的人（包括其他合规/维护人员）
+      #   都可以用它唤起 CodeVoyage，不再因为大小写或空格写法不同而“调用不到”。
       - name: find keyword
         id: match_keyword
         env:
@@ -76,10 +81,13 @@ jobs:
         with:
           script: |
             const list = JSON.parse(process.env.TRIGGER_LIST || '[]');
-            const content = process.env.TRIGGER_CONTENT || '';
+            // 归一化：小写 + 空白压成单个空格 + 去首尾空白
+            const norm = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+            const content = norm(process.env.TRIGGER_CONTENT);
             let hit = null;
             for (const w of list) {
-              if (w && content.includes(w)) { hit = w; break; }
+              const key = norm(w);
+              if (key && content.includes(key)) { hit = w; break; }
             }
             core.setOutput('hit', hit ? 'true' : 'false');
             core.setOutput('hit_word', hit || '');
