@@ -57,6 +57,7 @@ const WF_TEXT: Record<string, string> = {
   installed: 'workflow 已装',
   outdated: 'workflow 旧版',
   missing: 'workflow 未装',
+  pending: 'PR 待合并',
 }
 
 const TOKEN_TEXT: Record<string, string> = {
@@ -152,10 +153,19 @@ async function sendPr(target: { id: number; owner: string; name: string }) {
       token_source?: string
       tried?: number
       author_email?: string
+      unchanged?: boolean
       fallback?: { filename: string; path: string; content: string; repo_url: string; new_file_urls: string[] }
     }>('/api/repo/install-workflow', { id: target.id, owner: target.owner, name: target.name })
 
-    if (res.ok) {
+    if (res.ok && res.unchanged) {
+      prMap.value[target.id] = {
+        running: false, ok: true, pr_url: '', branch: res.branch || '',
+        reason: res.reason || '仓库中的 workflow 已是最新，无需重复提交 PR',
+        steps: res.steps || [],
+      }
+      wfStatus.value[target.id] = 'installed'
+      msg.value = 'workflow 已是最新，无需重复提交 PR'
+    } else if (res.ok) {
       prMap.value[target.id] = {
         running: false, ok: true, pr_url: res.pr_url || '', branch: res.branch || '',
         reason: `提交邮箱 ${res.author_email || ''}（用了第 ${res.tried || 1} 个令牌）`,
@@ -447,9 +457,12 @@ onActivated(refresh)
             </tr>
             <tr v-if="prMap[r.id]" class="detail-row">
               <td colspan="7">
-                <div v-if="prMap[r.id].ok" class="ok">
+                <div v-if="prMap[r.id].ok && prMap[r.id].pr_url" class="ok">
                   PR 已创建：<a :href="prMap[r.id].pr_url" target="_blank">{{ prMap[r.id].pr_url }}</a>
                   <span class="muted">（分支 {{ prMap[r.id].branch }}；{{ prMap[r.id].reason }}）请前往 GitHub 合并后点「刷新状态」</span>
+                </div>
+                <div v-else-if="prMap[r.id].ok" class="ok">
+                  {{ prMap[r.id].reason }}
                 </div>
                 <div v-else-if="prMap[r.id].running" class="muted">正在执行：准备特性分支 → 提交 → 推送 → 创建 PR…</div>
                 <div v-else>
@@ -490,9 +503,7 @@ onActivated(refresh)
         <li>绑定仓库时填好关键词与触发者白名单（留空=仅仓库 owner 可触发），绑定后会自动发送 PR。</li>
         <li>PR 由四步完成：准备特性分支 → 提交代码 → 推送远端 → 调用接口创建 PR；每步结果会显示在仓库下方。</li>
         <li>打开 PR 链接 <strong>合并 PR</strong>（未合并前 workflow 不生效）；合并后点「刷新状态」看到「workflow 已装」。</li>
-        <li>在仓库 <span class="mono">Settings → Secrets and variables → Actions</span> 配置：</li>
-        <li class="sub mono">BACKEND_WEBHOOK_URL = 服务端地址 + /api/Github/Issue</li>
-        <li class="sub mono">BACKEND_WEBHOOK_SECRET = 与服务端 .env 中 WEBHOOK_SECRET 一致</li>
+        <li>服务端地址与签名密钥已直接写入 workflow 文件，<strong>无需再配置仓库 Secrets</strong>。</li>
         <li>改了关键词/白名单或令牌后，点该仓库的「重发 PR」即可更新 workflow 文件。</li>
       </ol>
     </div>

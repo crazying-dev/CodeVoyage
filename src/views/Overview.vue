@@ -65,15 +65,19 @@ function remain(t: Task): number {
 
 onActivated(() => {
   refresh()
+  refreshLatency()
   timer = window.setInterval(refresh, 2000)
   ticker = window.setInterval(() => (now.value = Date.now()), 1000)
+  latTimer = window.setInterval(refreshLatency, 10000)
 })
 
 onDeactivated(() => {
   if (timer) clearInterval(timer)
   if (ticker) clearInterval(ticker)
+  if (latTimer) clearInterval(latTimer)
   timer = null
   ticker = null
+  latTimer = null
 })
 </script>
 
@@ -101,6 +105,18 @@ onDeactivated(() => {
           <span class="ok-dot" :class="{ on: state.status?.llm_configured }">LLM</span>
         </div>
         <div class="hint">模型：{{ state.status?.llm_model || '未设置' }}</div>
+      </div>
+      <div class="panel stat">
+        <div class="stat-label">GitHub 延迟</div>
+        <div class="row stat-val small">
+          <span :class="['status-tag', latClass(latency?.api)]" :title="latency?.api?.reason || ''">
+            API {{ latText(latency?.api) }}
+          </span>
+          <span :class="['status-tag', latClass(latency?.git)]" :title="latency?.git?.reason || ''">
+            Git {{ latText(latency?.git) }}
+          </span>
+        </div>
+        <div class="hint">{{ latencyAt ? `最近检测 ${latencyAt}，每 10 秒刷新` : '正在检测…' }}</div>
       </div>
     </div>
 

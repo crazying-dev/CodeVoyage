@@ -8,6 +8,7 @@ import json
 
 import requests
 
+import centre.net as net
 import centre.paths as paths
 
 DEFAULT_TIMEOUT = 60
@@ -31,9 +32,15 @@ def _conf_payload(payload: dict | None) -> dict:
 
 
 def call(endpoint: str, payload: dict | None = None, timeout: int = DEFAULT_TIMEOUT, raw: bool = False):
-    """POST JSON 到远端。raw=False 时返回 (json_body, status)；raw=True 返回 requests.Response。"""
+    """POST JSON 到远端。raw=False 时返回 (json_body, status)；raw=True 返回 requests.Response。
+
+    网络层：默认忽略失效的系统代理，失败按 5 次 / 5 秒重试（见 centre.net）。
+    """
     url = paths.remote_base() + endpoint
-    resp = requests.post(url, json=_conf_payload(payload), timeout=timeout)
+    try:
+        resp = net.request("post", url, timeout=timeout, json=_conf_payload(payload))
+    except requests.exceptions.RequestException as e:
+        raise RemoteError(net.friendly_error(e), 502) from e
     if raw:
         return resp
     try:

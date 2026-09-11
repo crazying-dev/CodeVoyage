@@ -1,24 +1,93 @@
 """Git 仓库工具（通过本机 git CLI 执行）。
 
-克隆时把 GitHub PAT 嵌入 URL 仅用于本次命令，避免把密钥写进 origin 配置；
-该 PAT 来自本地配置，绝不外传。
+- 克隆时把 GitHub PAT 嵌入 URL 仅用于本次命令，不写进 origin 配置；PAT 绝不外传；
+- 默认剔除系统代理环境变量（HTTP_PROXY/HTTPS_PROXY 等），避免被失效代理拖死；
+  如需代理，设置 CODEVOYAGE_PROXY 后重启；
+- 网络类命令（clone/fetch/push）失败自动重试，默认 5 次、间隔 5 秒
+  （可用 CODEVOYAGE_RETRY / CODEVOYAGE_RETRY_INTERVAL 调整）。
 """
 import os
 import shutil
 import stat
 import subprocess
+import time
+
+DEFAULT_RETRY = 5
+DEFAULT_RETRY_INTERVAL = 5.0
+
+# 判定为“网络类失败”的关键字（命中才重试）
+RETRYABLE_MARKERS = (
+    "couldn't connect", "failed to connect", "connection refused", "connection reset",
+    "timed out", "timeout", "could not resolve host", "unable to access",
+    "the remote end hung up", "rpc failed", "early eof", "tls", "ssl",
+    "temporary failure", "network is unreachable", "operation timed out",
+    "empty reply from server", "http 5",
+)
 
 
-def _run(dest: str | None, *args: str) -> str:
+def _retry_config() -> tuple[int, float]:
+    try:
+        times = int(os.getenv("CODEVOYAGE_RETRY", str(DEFAULT_RETRY)))
+    except ValueError:
+        times = DEFAULT_RETRY
+    try:
+        interval = float(os.getenv("CODEVOYAGE_RETRY_INTERVAL", str(DEFAULT_RETRY_INTERVAL)))
+    except ValueError:
+        interval = DEFAULT_RETRY_INTERVAL
+    return max(0, times), max(0.0, interval)
+
+
+def _log(message: str) -> None:
+    try:
+        from centre import paths
+
+        paths.append_log(message)
+    except Exception:
+        pass
+
+
+def _git_env() -> dict:
+    """git 子进程环境：默认剔除系统代理；仅当 CODEVOYAGE_PROXY 设置时启用代理。"""
+    env = os.environ.copy()
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        env.pop(key, None)
+    proxy = (os.getenv("CODEVOYAGE_PROXY") or "").strip()
+    if proxy:
+        env["HTTP_PROXY"] = env["http_proxy"] = proxy
+        env["HTTPS_PROXY"] = env["https_proxy"] = proxy
+    return env
+
+
+def _is_retryable(text: str) -> bool:
+    low = (text or "").lower()
+    return any(marker in low for marker in RETRYABLE_MARKERS)
+
+
+def _run(dest: str | None, *args: str, retries: int | None = 0, label: str = "") -> str:
+    """执行 git 命令。retries=None 表示用环境配置（默认 5 次 / 5 秒）。"""
     cmd = ["git"]
     if dest:
-        cmd.append("-C")
-        cmd.append(dest)
+        cmd.extend(["-C", dest])
     cmd.extend(args)
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    if proc.returncode != 0:
-        raise RuntimeError((proc.stderr or proc.stdout or "git error").strip())
-    return (proc.stdout or "").strip()
+
+    if retries is None:
+        times, interval = _retry_config()
+    else:
+        times, interval = max(0, retries), _retry_config()[1]
+    attempts = times + 1
+    last_error = "git error"
+    for attempt in range(1, attempts + 1):
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=900, env=_git_env())
+        if proc.returncode == 0:
+            return (proc.stdout or "").strip()
+        last_error = (proc.stderr or proc.stdout or "git error").strip()
+        if attempt < attempts and _is_retryable(last_error):
+            name = label or " ".join(args[:2])
+            _log(f"git {name} 失败（第 {attempt}/{attempts} 次）：{last_error[:200]}；{interval:.0f}s 后重试")
+            time.sleep(interval)
+            continue
+        break
+    raise RuntimeError(last_error)
 
 
 def _token_url(repo_full: str, token: str | None) -> str:
@@ -33,7 +102,7 @@ def clone(repo_full: str, token: str | None, dest: str) -> None:
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     if os.path.exists(dest):
         raise RuntimeError(f"目标目录已存在: {dest}")
-    _run(None, "clone", "--quiet", _token_url(repo_full, token), dest)
+    _run(None, "clone", "--quiet", _token_url(repo_full, token), dest, retries=None, label="clone")
 
 
 def clone_shallow(repo_full: str, token: str | None, dest: str, depth: int = 1) -> None:
@@ -42,12 +111,12 @@ def clone_shallow(repo_full: str, token: str | None, dest: str, depth: int = 1) 
     if os.path.exists(dest):
         raise RuntimeError(f"目标目录已存在: {dest}")
     _run(None, "clone", "--quiet", "--depth", str(depth), "--single-branch",
-         _token_url(repo_full, token), dest)
+         _token_url(repo_full, token), dest, retries=None, label="clone")
 
 
 def unshallow(dest: str) -> None:
     """把浅克隆补全为完整历史（推送被拒时的兜底）。"""
-    _run(dest, "fetch", "--unshallow", "--quiet")
+    _run(dest, "fetch", "--unshallow", "--quiet", retries=None, label="fetch --unshallow")
 
 
 def current_branch(dest: str) -> str:
@@ -67,6 +136,11 @@ def write_file(dest: str, rel_path: str, content: str) -> str:
     with open(target, "w", encoding="utf-8", newline="\n") as f:
         f.write(content)
     return target
+
+
+def changed(dest: str, path: str) -> bool:
+    """判断指定路径相对 HEAD 是否有改动（新增/修改均算）。"""
+    return bool(_run(dest, "status", "--porcelain", "--", path))
 
 
 def commit_paths(dest: str, paths: list, message: str) -> str:
@@ -99,7 +173,8 @@ def commit_all(dest: str, message: str, name: str | None = None, email: str | No
 
 
 def push(dest: str, repo_full: str, token: str, branch: str) -> None:
-    _run(dest, "push", "--quiet", _token_url(repo_full, token), f"{branch}:{branch}")
+    _run(dest, "push", "--quiet", _token_url(repo_full, token), f"{branch}:{branch}",
+         retries=None, label="push")
 
 
 def changed_files(dest: str) -> str:

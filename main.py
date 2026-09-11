@@ -26,12 +26,12 @@ def _open_console() -> None:
 
 
 def _start_tray():
-    """可选托盘：未安装依赖时自动跳过，仍可通过控制台「退出客户端」关闭。"""
+    """可选托盘：未安装依赖时自动跳过，退出可直接结束后台进程。"""
     try:
         import pystray
         from PIL import Image, ImageDraw
     except Exception:
-        paths.append_log("未安装 pystray/Pillow，跳过系统托盘；可在控制台右上角「退出客户端」关闭")
+        paths.append_log("未安装 pystray/Pillow，跳过系统托盘；退出请直接结束后台进程（或 Ctrl+C）")
         return None
 
     image = Image.new("RGB", (64, 64), (13, 14, 17))
@@ -68,5 +68,5 @@ if __name__ == "__main__":
         threading.Thread(target=lambda: (time.sleep(1.5), _open_console()), daemon=True).start()
     _start_tray()
     print(f"CodeVoyage 控制台：{CONSOLE_URL}")
-    print("本进程为常驻后台：关闭浏览器页面不影响运行；退出请用控制台「退出客户端」或托盘「退出」（Ctrl+C 亦可）。")
+    print("本进程为常驻后台：关闭浏览器页面不影响运行；退出请用托盘「退出」（Ctrl+C 亦可）。")
     centre.main()

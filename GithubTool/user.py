@@ -6,7 +6,6 @@
 """
 import time
 
-import requests
 from github import Github
 from github.Auth import Token
 
@@ -42,6 +41,12 @@ def token_kind(token: str) -> str:
 
 
 def gh(token: str) -> Github:
+    try:  # 统一代理策略：避免 PyGithub 走失效的系统代理
+        from centre import net as _net
+
+        _net.apply_proxy_policy()
+    except Exception:
+        pass
     return Github(auth=Token(token))
 
 
@@ -68,17 +73,26 @@ def describe_token(token: str) -> dict:
     """
     kind = token_kind(token)
     try:
-        resp = requests.get(
+        from centre import net  # 统一网络层：忽略失效系统代理 + 5 次/5s 重试
+
+        resp = net.request(
+            "get",
             "https://api.github.com/user",
+            timeout=15,
             headers={
                 "Authorization": f"Bearer {token}",
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
             },
-            timeout=15,
         )
     except Exception as e:
-        return {"ok": False, "kind": kind, "login": "", "scopes": [], "reason": f"网络请求失败：{e}"}
+        try:
+            from centre import net as _net
+
+            reason = _net.friendly_error(e)
+        except Exception:
+            reason = f"网络请求失败：{e}"
+        return {"ok": False, "kind": kind, "login": "", "scopes": [], "reason": reason}
     if resp.status_code != 200:
         return {"ok": False, "kind": kind, "login": "", "scopes": [],
                 "reason": f"令牌校验失败（HTTP {resp.status_code}）：{(resp.text or '')[:200]}"}
@@ -254,6 +268,11 @@ def commit_workflow_pr(token: str, repo_full: str, path: str, content: str,
         # 2) 提交代码
         existed = os.path.isfile(os.path.join(repo_dir, path.replace("/", os.sep)))
         GitRepo.write_file(repo_dir, path, content)
+        if not GitRepo.changed(repo_dir, path):
+            # 仓库里已存在完全相同的文件：无需提交，直接告知已是最新
+            _log(f"2/4 {path} 与仓库当前内容一致，无需变更")
+            return {"pr_url": "", "branch": base, "base": base,
+                    "existed": True, "unchanged": True, "steps": steps}
         commit_hash = GitRepo.commit_paths(repo_dir, [path], f"{title}\n\n提交邮箱：{email}")
         _log(f"2/4 已提交 {path}（commit {commit_hash}，作者 {email}）")
 
@@ -276,9 +295,7 @@ def commit_workflow_pr(token: str, repo_full: str, path: str, content: str,
             f"- 分支：`{branch}` → `{base}`\n"
             f"- 提交邮箱：`{email}`\n"
             "- **合并本 PR 后** workflow 才会生效\n"
-            "- 合并前请在仓库 Settings → Secrets and variables → Actions 中配置：\n"
-            "  - `BACKEND_WEBHOOK_URL`\n"
-            "  - `BACKEND_WEBHOOK_SECRET`\n"
+            "- 服务端地址与签名密钥已直接写入 workflow 文件，无需再配置仓库 Secrets\n"
         )
         pr = repo.create_pull(title=title, body=body, head=branch, base=base)
         _log(f"4/4 已创建 PR：{pr.html_url}")

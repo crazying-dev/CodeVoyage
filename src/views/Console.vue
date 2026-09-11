@@ -53,17 +53,6 @@ onMounted(async () => {
   }
   ready.value = true
 })
-
-async function shutdown() {
-  if (!confirm('确定退出 CodeVoyage 客户端吗？退出后 Agent 将不再接收任务。')) return
-  try {
-    await postJSON('/api/agent/shutdown', {})
-  } catch {
-    /* 进程退出时连接可能中断，忽略 */
-  }
-  alert('客户端正在关闭，可以安全关闭此页面。')
-  window.close()
-}
 </script>
 
 <template>
@@ -77,8 +66,6 @@ async function shutdown() {
       >
         {{ t.label }}
       </button>
-      <div class="spacer"></div>
-      <button class="danger" @click="shutdown">退出客户端</button>
     </div>
 
     <div class="content">
@@ -112,11 +99,6 @@ async function shutdown() {
   color: var(--text);
   background: var(--panel-2);
   border-color: var(--border);
-}
-
-.tabs button.danger {
-  border-color: var(--danger);
-  color: var(--danger);
 }
 
 .content {

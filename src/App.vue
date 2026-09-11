@@ -36,7 +36,7 @@ async function doLogout() {
     <RouterView />
     <p class="app-hint">
       本页面只是控制台界面：关闭浏览器标签不会停止后台运行（GetIssue / Agent / 5431 服务仍在工作）。
-      退出请用控制台右上角「退出客户端」，或系统托盘的「退出」。
+      退出请使用系统托盘的「退出」。
     </p>
   </main>
 </template>

@@ -31,6 +31,7 @@ const diag = ref<{
   logged_in: boolean
   session: { checked: boolean; valid: boolean; reason: string }
   storage: { base_dir: string; source: string; writable: boolean; files: { name: string; path: string; exists: boolean; size: number; mtime: string }[] }
+  network: { proxy: string; system_proxy_ignored: boolean; retry: number; retry_interval: number }
 } | null>(null)
 const loadingDiag = ref(false)
 
@@ -188,6 +189,16 @@ async function verifyGithub() {
           <span v-else class="status-tag failed">已失效：{{ diag.session.reason }}</span>
         </p>
         <p v-else class="hint">登录态：<span class="status-tag">未登录</span></p>
+
+        <p class="hint">
+          网络：<span v-if="diag.network.proxy" class="mono">使用代理 {{ diag.network.proxy }}</span>
+          <span v-else>已忽略系统代理（直连，避免失效代理拖死）</span>
+          ；失败重试 {{ diag.network.retry }} 次、间隔 {{ diag.network.retry_interval }}s
+        </p>
+        <p v-if="!diag.network.proxy" class="hint">
+          如需走代理，请设置环境变量 <span class="mono">CODEVOYAGE_PROXY</span>（例如
+          <span class="mono">http://127.0.0.1:7890</span>）后重启客户端。
+        </p>
 
         <table class="list">
           <thead>

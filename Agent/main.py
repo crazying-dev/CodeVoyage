@@ -126,7 +126,11 @@ def run_task(task: dict) -> dict:
                 clone_error = e
                 paths.append_log(f"[{repo_full}#{issue_number}] 第 {idx} 个令牌克隆失败：{e}")
         if not gh_token:
-            raise AgentError(f"全部 {len(token_candidates)} 个令牌都无法克隆仓库：{clone_error}")
+            hint = ""
+            low = str(clone_error).lower()
+            if any(k in low for k in ("connect", "timed out", "timeout", "resolve host", "unable to access", "network")):
+                hint = "（网络类失败，已按 5 次 / 5 秒重试；如网络受限可设置环境变量 CODEVOYAGE_PROXY）"
+            raise AgentError(f"全部 {len(token_candidates)} 个令牌都无法克隆仓库：{clone_error}{hint}")
 
         default = ""
         try:

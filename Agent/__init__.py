@@ -1,7 +1,7 @@
 """Agent 服务主循环。
 
 单线程消费中心队列：
-1. 发现 waiting/confirming 任务 -> 置为 confirming 并等待用户确认（控制台按钮），
+1. 发现 waiting/confirming 任务 -> 置为 confirming，右下角弹窗 + 控制台按钮等待用户确认，
    超时（10s）默认执行；
 2. 用户放弃 -> 本地标记 putout，并向远端回执 PutOut；
 3. 执行（Agent.main.run_task：克隆/AI 修改/提交/推送/PR）：
@@ -43,6 +43,8 @@ def main():
             repo_full = current.get("repo_full", "")
             issue_no = current.get("issue_number", "")
             paths.append_log(f"等待确认：{repo_full}#{issue_no}（10s 内未操作自动执行）")
+            # 右下角弹窗，可直接在窗口里确认；不操作则倒计时结束自动执行
+            notify.ask(uid, repo_full, issue_no, current.get("title", ""), core.CONFIRM_SECONDS)
 
             agreed = core.wait_decision(uid, timeout=12)
             if not agreed:

@@ -7,10 +7,11 @@
    /api/local/config（GitHub PAT、LLM Key 等本地配置）
 """
 import re
+import threading
 
 from flask import jsonify, request
 
-from centre import core, paths, remote
+from centre import core, net, paths, remote
 
 
 def register(app):
@@ -93,6 +94,12 @@ def register(app):
             "logged_in": bool(conf),
             "session": session,
             "storage": paths.storage_info(),
+            "network": {
+                "proxy": net.proxy_url(),
+                "system_proxy_ignored": not net.proxy_url(),
+                "retry": net.retry_config()[0],
+                "retry_interval": net.retry_config()[1],
+            },
             "agent": core.get_state(),
         })
 
@@ -322,6 +329,14 @@ def register(app):
             except Exception as e:
                 errors.append(f"第 {index} 个令牌（{source}）：{e}")
                 continue
+            if res.get("unchanged"):
+                return jsonify({
+                    "message": "OK", "ok": True, "unchanged": True, "existed": True,
+                    "pr_url": "", "branch": res["branch"], "filename": filename, "path": path,
+                    "reason": "仓库中的 workflow 与当前配置完全一致，已是最新，无需重复提交 PR。",
+                    "token_source": source, "tried": index, "author_email": git_email,
+                    "steps": res.get("steps", []),
+                })
             return jsonify({
                 "message": "OK", "ok": True, "pr_url": res["pr_url"], "branch": res["branch"],
                 "filename": filename, "path": path, "existed": res["existed"],
@@ -432,23 +447,27 @@ def register(app):
                         "reason": "已尝试全部令牌均失败"})
 
     # ---------------------------------------------------------------
-    # 退出客户端（仅允许本机调用）
+    # GitHub 延迟实时探测（前端定时刷新）
     # ---------------------------------------------------------------
-    @app.route("/api/agent/shutdown", methods=["POST"])
-    def agent_shutdown():
-        addr = (request.remote_addr or "").strip()
-        if addr not in ("127.0.0.1", "::1", "localhost"):
-            return jsonify({"message": "only local allowed"}), 403
-        import os as _os
-        import threading
+    @app.route("/api/local/github-latency", methods=["POST"])
+    def github_latency():
+        """探测到 GitHub 的往返延迟：api = PyGithub 接口，git = clone/push 传输。"""
+        probes = (("api", "https://api.github.com/"), ("git", "https://github.com/"))
+        out: dict = {}
 
-        paths.append_log("收到退出请求，客户端即将关闭")
+        def _run(key: str, url: str) -> None:
+            out[key] = net.latency(url)
 
-        def _exit():
-            _os._exit(0)
-
-        threading.Timer(0.6, _exit).start()
-        return jsonify({"message": "OK", "detail": "客户端正在关闭"})
+        threads = []
+        for key, url in probes:
+            t = threading.Thread(target=_run, args=(key, url), daemon=True)
+            t.start()
+            threads.append(t)
+        for t in threads:
+            t.join(timeout=12)
+        for key, _url in probes:
+            out.setdefault(key, {"ok": False, "status": 0, "ms": 0, "reason": "探测超时"})
+        return jsonify({"message": "OK", **out})
 
     # ---------------------------------------------------------------
     # GetIssue 组件上报（远端 -> GetIssue 组件 -> 5431 入库）
