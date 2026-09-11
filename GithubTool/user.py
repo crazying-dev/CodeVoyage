@@ -236,6 +236,7 @@ def commit_workflow_pr(token: str, repo_full: str, path: str, content: str,
     """按「准备特性分支 → 提交代码 → 推送远端 → 调接口创建 PR」四步安装 workflow。
 
     author_name/author_email 为提交身份（默认 3890320020@qq.com）。
+    提交与 PR 标题统一遵循 Conventional Commits（Issue #15）。
     返回 {pr_url, branch, base, existed, steps}；失败抛 RuntimeError（含指引）。
     本地临时目录在结束时清理。
     """
@@ -261,10 +262,17 @@ def commit_workflow_pr(token: str, repo_full: str, path: str, content: str,
             pass
 
     try:
+        from centre import commit_msg  # 提交信息规范（Issue #15）
+
         # 0) 读取仓库默认分支
         repo = gh(token).get_repo(repo_full)
         base = repo.default_branch
         existed = False
+
+        # 0.5) 提交与 PR 标题规范化：调用方给了自定义标题时同样按规范处理
+        title, _note = commit_msg.ensure(
+            title or "chore: add CodeVoyage workflow", scope_hint="ci",
+        )
 
         # 1) 准备特性分支（浅克隆 → 建分支）
         GitRepo.clone_shallow(repo_full, token, repo_dir)

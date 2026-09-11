@@ -3,33 +3,39 @@
 克隆仓库、建分支、提交推送、创建 PR 原本在任务开始时由程序直接执行，
 现在改为工具交给 AI 按需调用，程序只负责注入上下文与兜底。
 
+提交信息与 PR 标题统一走 centre.commit_msg（Conventional Commits，Issue #15）：
+AI 给出的信息合规就原样使用，不合规则自动改写，避免历史里出现模糊/无效提交。
+
 令牌解析仍走 paths.resolve_tokens（仓库专属细粒度 → 全局传统，顺序回退），
 网络受限时经 proxy.github_call 自动切到 GitHub 代理。
 """
-from centre import paths, proxy
+from centre import commit_msg, paths, proxy
 from tools import GitRepo, ReadFile
 
 _ctx = {
     "repo_full": "",
     "uid": "",
     "issue_number": None,
+    "issue_title": "",
     "dest": "",
     "cloned": False,
     "token": "",
     "token_source": "",
     "branch": "",
     "default_branch": "",
+    "changed_files": [],
     "pushed": False,
     "pr_url": "",
 }
 
 
-def set_context(repo_full: str, uid: str, issue_number, dest: str) -> None:
-    """任务开始时注入上下文（每次任务重置状态）。"""
+def set_context(repo_full: str, uid: str, issue_number, dest: str, title: str = "") -> None:
+    """任务开始时注入上下文（每次任务重置状态）。title 为 Issue 标题，用于推断提交信息。"""
     _ctx.update({
         "repo_full": repo_full, "uid": uid, "issue_number": issue_number, "dest": dest,
-        "cloned": False, "token": "", "token_source": "", "branch": "",
-        "default_branch": "", "pushed": False, "pr_url": "",
+        "issue_title": str(title or "").strip(), "cloned": False, "token": "",
+        "token_source": "", "branch": "", "default_branch": "", "changed_files": [],
+        "pushed": False, "pr_url": "",
     })
 
 
@@ -39,6 +45,18 @@ def state() -> dict:
 
 def _log(msg: str) -> None:
     paths.append_log(f"[{_ctx['repo_full']}#{_ctx['issue_number']}] {msg}")
+
+
+def _changed_files(dest: str) -> list:
+    """工作区改动文件清单（`git status --porcelain` 的首列状态 + 路径）。"""
+    out = []
+    for line in GitRepo.changed_files(dest).splitlines():
+        path = line[3:].strip() if len(line) > 3 else ""
+        if path.startswith('"') and path.endswith('"'):
+            path = path[1:-1]
+        if path:
+            out.append(path)
+    return out
 
 
 # ---------------------------------------------------------------- 工具实现
@@ -102,26 +120,39 @@ def create_branch() -> str:
 
 
 def commit_and_push(message: str = "") -> str:
-    """提交工作区全部改动并推送当前分支。"""
+    """提交工作区全部改动并推送当前分支。
+
+    提交信息遵循 Conventional Commits（Issue #15）：`<type>(<scope>): <description>`；
+    AI 给的信息不合规时会被自动改写，结果连同说明一起返回。
+    """
     if not _ctx["branch"]:
         return "错误：请先调用 create_branch 创建分支。"
     dest = _ctx["dest"]
     if not GitRepo.changed_files(dest).strip():
         return "错误：工作区没有任何文件改动，无需提交。"
+    files = _changed_files(dest)
+    _ctx["changed_files"] = files
     name, email = paths.git_identity()
-    msg = (message or "").strip() or f"CodeVoyage: 处理 #{_ctx['issue_number']}"
+    raw = (message or "").strip() or _ctx["issue_title"] or f"处理 #{_ctx['issue_number']}"
+    msg, note = commit_msg.ensure(
+        raw, files=files, issue_number=_ctx["issue_number"], title=_ctx["issue_title"],
+        scope_hint=commit_msg.infer_scope(files),
+    )
+    if note:
+        _log(f"提交信息规范化：{note}")
     try:
         GitRepo.commit_all(dest, msg, name=name, email=email)
         proxy.github_call(GitRepo.push, dest, _ctx["repo_full"], _ctx["token"], _ctx["branch"])
     except Exception as e:
         return f"错误：提交或推送失败：{e}"
     _ctx["pushed"] = True
-    _log(f"已提交并推送：{msg[:80]}")
-    return f"已提交并推送到分支 {_ctx['branch']}；提交信息：{msg[:120]}"
+    _log(f"已提交并推送：{msg.splitlines()[0]}")
+    tail = f"（{note}）" if note else ""
+    return f"已提交并推送到分支 {_ctx['branch']}{tail}；提交信息：\n{msg}"
 
 
 def create_pull_request(title: str = "", body: str = "") -> str:
-    """调用 GitHub API 创建 Pull Request。"""
+    """调用 GitHub API 创建 Pull Request（标题同样遵循 Conventional Commits）。"""
     if not _ctx["pushed"]:
         return "错误：请先调用 commit_and_push 推送改动。"
     if _ctx["pr_url"]:
@@ -129,7 +160,13 @@ def create_pull_request(title: str = "", body: str = "") -> str:
     try:
         from GithubTool import user as gh_user
 
-        pr_title = (title or "").strip()[:100] or f"CodeVoyage: 处理 #{_ctx['issue_number']}"
+        raw_title = (title or "").strip() or _ctx["issue_title"]
+        if not raw_title:
+            raw_title = f"处理 #{_ctx['issue_number']}"
+        pr_title = commit_msg.pr_title(
+            raw_title, _ctx["issue_number"],
+            files=_ctx["changed_files"] or _changed_files(_ctx["dest"]),
+        )
         pr_url = proxy.github_call(
             gh_user.create_pr, _ctx["token"], _ctx["repo_full"], _ctx["branch"],
             _ctx["default_branch"], pr_title, body or "",
@@ -137,5 +174,5 @@ def create_pull_request(title: str = "", body: str = "") -> str:
     except Exception as e:
         return f"错误：创建 PR 失败：{e}"
     _ctx["pr_url"] = pr_url
-    _log(f"已创建 PR：{pr_url}")
-    return f"PR 已创建：{pr_url}"
+    _log(f"已创建 PR：{pr_url}（标题 {pr_title}）")
+    return f"PR 已创建：{pr_url}；标题：{pr_title}"

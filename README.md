@@ -30,6 +30,7 @@ CodeVoyage是一个通过[`Action Workflow`](https://docs.github.com/zh/actions)
 2. AI处理后的代码以[`Pull requests`](https://docs.github.com/en/rest/pulls)提交，全程更透明，不用担心AI发疯导致仓库损坏
 3. AI处理沙盒运行，不导致AI发疯导致电脑错误
 4. PR合并进主分支后，本次工作分支（`codevoyage/*`）会被自动销毁，仓库分支列表不会堆积
+5. 提交信息与PR标题遵循[`Conventional Commits`](https://www.conventionalcommits.org/zh-hans/)规范，AI给出的信息不合规会被自动规范化，历史清晰可追溯
 
 ---
 
@@ -53,6 +54,16 @@ Agent服务循环获取最新任务，若获取到的任务的仓库未在执行
    - 未合并 / PR关闭但未合并 / 合并目标不是默认分支 -> 保留分支，不做任何破坏性操作
 4. 安全约束：只处理`codevoyage/*`前缀分支，默认分支（main/master等）与受保护分支永不删除；除队列外还会做一次兜底发现，清理历史遗留的已合并工作分支
 5. 手动查看或立即清理：调用`cleanup_branches`工具（`run=false`查看待清理队列，`run=true`立即销毁已合并的工作分支）
+
+---
+
+## 提交与 PR 规范（见Issue #15）
+提交信息与PR标题统一遵循`Conventional Commits`：`<type>(<scope>): <description>`
+
+1. type取`feat/fix/docs/style/refactor/perf/test/build/ci/chore/revert`，scope取受影响模块（agent/centre/tools/console/ci/docs等）
+2. description用一句话说清改动、结尾不加句号；改动较多时空行后补正文，并用`Refs #Issue编号`关联Issue，不兼容变更写`BREAKING CHANGE: 说明`
+3. 程序侧实现：`centre/commit_msg.py`（推断/规范化/校验），`tools/RepoOps.py`在`commit_and_push`与`create_pull_request`时自动套用，AI给出的信息不合规会被改写并返回说明
+4. 完整规则、示例与正反例见[`CONTRIBUTING.md`](./CONTRIBUTING.md)；人工提交可启用模板：`git config commit.template .gitmessage`
 
 Agent的工具(每个工具都单独一个文件):
 1. Git仓库获取

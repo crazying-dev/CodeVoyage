@@ -85,11 +85,20 @@ tools = [
         "type": "function",
         "function": {
             "name": "commit_and_push",
-            "description": "提交工作区全部改动并推送到当前分支。改动完成后调用。",
+            "description": (
+                "提交工作区全部改动并推送到当前分支，改动完成后调用。message 必须遵循 Conventional Commits："
+                "`<type>(<scope>): <description>`，type 取 feat/fix/docs/style/refactor/perf/test/build/ci/chore/revert，"
+                "scope 为受影响模块（agent/centre/tools/console/ci 等），description 用一句话说明改动且结尾不加句号；"
+                "改动较多时可在空行后补正文，并用 `Refs #Issue编号` 关联 Issue。"
+                "信息不合规时会被自动规范化，返回值会给出最终提交信息。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "message": {"type": "string", "description": "提交信息，一句话说明改动"}
+                    "message": {
+                        "type": "string",
+                        "description": "提交信息，格式 `<type>(<scope>): <description>`，例如 `fix(agent): 修复兜底提交信息`",
+                    }
                 },
                 "required": ["message"],
                 "additionalProperties": False,
@@ -100,11 +109,15 @@ tools = [
         "type": "function",
         "function": {
             "name": "create_pull_request",
-            "description": "调用 GitHub API 创建 Pull Request，是任务的最后一步；推送成功后调用。",
+            "description": (
+                "调用 GitHub API 创建 Pull Request，是任务的最后一步；推送成功后调用。"
+                "title 同样遵循 Conventional Commits（如 `fix(agent): 修复兜底提交信息 (#15)`），"
+                "不合规会被自动规范化；正文用完整 Markdown 说明改了什么。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "title": {"type": "string", "description": "PR 标题"},
+                    "title": {"type": "string", "description": "PR 标题，格式 `<type>(<scope>): <description>`"},
                     "body": {"type": "string", "description": "PR 正文，Markdown，说明改了什么"},
                 },
                 "required": ["title", "body"],

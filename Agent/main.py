@@ -5,7 +5,8 @@
 2. 组装系统提示（含工作区边界）与 Issue 内容，调用 LLM（多条 LLM 配置按顺序回退）；
 3. LLM 通过工具（read_file/write_file/list_dir/plan）在工作区内完成修改；
 4. 全过程写入执行轨迹（centre.trace），控制台可实时查看与事后回看；
-5. 解析最终答复中的 Conclusion，作为提交信息；
+5. 解析最终答复中的 Conclusion，作为提交信息（经 centre.commit_msg 规范化为
+   Conventional Commits，见 Issue #15）；
 6. git 提交并推送分支，调用 GitHub API 创建 Pull Request；
 7. 登记本次工作分支（centre.branch_gc）：PR 合并进默认分支后由后台巡检自动销毁，
    保证项目仓库的分支管理规范可维护（Issue #13）；
@@ -19,7 +20,7 @@ import os
 
 import config
 import Info
-from centre import branch_gc, core, credentials, paths, proxy, trace
+from centre import branch_gc, commit_msg, core, credentials, paths, proxy, trace
 
 _MAX_ITERATIONS = 80
 
@@ -95,6 +96,7 @@ def _build_issue_prompt(task: dict) -> str:
             lines.append(f"{i}. {c.get('user', '?')}: {c.get('body', '')}")
     lines.append("")
     lines.append("请在修改前先调用 plan 说明处理计划，随后使用工具读取与修改工作区代码。")
+    lines.append("提交与 PR 信息请遵循 Conventional Commits 规范（详见仓库 CONTRIBUTING.md）。")
     lines.append("最终答复必须是完整合法 Markdown，并包含 Introduce / Body / Conclusion 三部分；")
     lines.append("Conclusion 用于生成提交与 PR 信息，请在其中总结你做的每一处更改与原因。")
     return "\n".join(lines)
@@ -105,6 +107,7 @@ def run_task(task: dict) -> dict:
     repo_full = task["repo_full"]
     uid = task.get("uuid", "")
     issue_number = task.get("issue_number")
+    issue_title = str(task.get("title") or "").strip()
 
     # 令牌存服务端，先尽力同步一次（远端不可用时沿用本机缓存）
     try:
@@ -133,7 +136,8 @@ def run_task(task: dict) -> dict:
 
     # 克隆 / 建分支 / 提交推送 / 建 PR 全部由 AI 调用工具完成；
     # 这里只注入上下文并先划定工作区边界（文件工具一律限制在此目录内）。
-    RepoOps.set_context(repo_full, uid, issue_number, dest)
+    # issue_title 一并注入：提交信息/PR 标题不合规时按 Issue 标题推断 type 与 description。
+    RepoOps.set_context(repo_full, uid, issue_number, dest, issue_title)
     ReadFile.set_workspace(dest)
 
     try:
@@ -153,7 +157,9 @@ def run_task(task: dict) -> dict:
 
         # ---------------- 收尾：AI 若漏了最后几步，程序兜底，保证改动不丢 ----------------
         conclusion = _extract_conclusion(final_content)
-        pr_title = f"{task.get('title') or 'AI fix'} (#{issue_number})"[:100]
+        # 兜底提交/PR 信息同样遵循 Conventional Commits（Issue #15）：
+        # 这里先用 Issue 标题生成规范标题，提交信息再经 RepoOps -> centre.commit_msg 规范化。
+        pr_title = commit_msg.pr_title(issue_title or "AI 处理 Issue", issue_number)
 
         if not RepoOps.state()["cloned"]:
             raise AgentError("AI 未调用 clone_repo 克隆仓库，任务未完成")

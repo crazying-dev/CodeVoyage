@@ -1,0 +1,15 @@
+# <type>(<scope>): <description>
+# 例：fix(tools): 修复提交信息缺少类型前缀的问题
+#
+# type（必填，小写）：feat / fix / docs / style / refactor / perf / test / build / ci / chore / revert
+# scope（可选，小写）：agent / centre / tools / console / info / github / ci / docs / build / config
+# description（必填）：一句话说明改动，中文即可，结尾不加句号
+# 规范与示例见 CONTRIBUTING.md，程序侧实现见 centre/commit_msg.py
+#
+# ↓↓ 正文（可选，与标题之间留一个空行）：说明「为什么改」，每行 ≤ 72 字符
+#
+#
+# ↓↓ 页脚（可选）：
+# Refs #15                     关联 Issue（不自动关闭）
+# Closes #15                   合并/进入默认分支后自动关闭 Issue
+# BREAKING CHANGE: <说明>       不兼容变更（必写迁移方式）
