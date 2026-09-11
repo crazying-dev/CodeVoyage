@@ -7,6 +7,10 @@
   （可用 CODEVOYAGE_RETRY / CODEVOYAGE_RETRY_INTERVAL 调整）；
 - 所有按“相对路径”操作文件的函数（write_file / changed / commit_paths）都经
   `_safe_join` 强制校验，杜绝 `..`、绝对路径与符号链接逃逸。
+
+PR 冲突处理（Issue #19）用到的能力集中在文件末尾：「取分支 → 试合并（不提交）→
+列出冲突文件 → 取某一侧内容 → 提交 / 回滚」。这些函数一律不做 force push，
+也不改写远端历史，出问题时可调用 abort_merge / reset_hard 回到操作前的状态。
 """
 import os
 import shutil
@@ -77,6 +81,17 @@ def _safe_join(dest: str, rel_path: str) -> str:
     if target_cmp != base_cmp and not target_cmp.startswith(base_cmp + os.sep):
         raise ValueError(f"路径超出工作区，已拒绝：{rel_path}")
     return target
+
+
+def safe_path(dest: str, rel_path: str) -> str:
+    """对外暴露的路径校验（PR 冲突处理按冲突文件路径落盘时复用同一套约束）。"""
+    return _safe_join(dest, rel_path)
+
+
+def _rel(dest: str, rel_path: str) -> str:
+    """校验并转成相对工作区的 git 路径。"""
+    target = _safe_join(dest, rel_path)
+    return os.path.relpath(target, os.path.realpath(os.path.abspath(dest)))
 
 
 def _git_env() -> dict:
@@ -250,3 +265,105 @@ def remove_dir(dest: str) -> None:
             except OSError:
                 pass
     shutil.rmtree(dest, ignore_errors=True)
+
+
+# ------------------------------------------------- PR 冲突处理（Issue #19）
+def fetch(dest: str, repo_full: str, token: str, *refs: str) -> str:
+    """从远端取引用（不带 refs 时只更新 FETCH_HEAD / 远端跟踪引用）。"""
+    args = ["fetch", "--quiet", _token_url(repo_full, token)]
+    args.extend(refs)
+    return _run(dest, *args, retries=None, label="fetch")
+
+
+def fetch_branch(dest: str, repo_full: str, token: str, branch: str,
+                 local_ref: str = "") -> str:
+    """把远端 branch 取到本地引用。
+
+    该分支正被 checkout 时不能直接更新其本地引用（git 会拒绝），因此调用方要么先切走，
+    要么用 local_ref 指定别的引用名。
+    """
+    target = local_ref or f"refs/heads/{branch}"
+    return _run(dest, "fetch", "--quiet", _token_url(repo_full, token),
+                f"+refs/heads/{branch}:{target}", retries=None, label="fetch branch")
+
+
+def checkout(dest: str, branch: str) -> str:
+    """切换分支（分支必须已存在；工作区是否干净由调用方保证）。"""
+    return _run(dest, "checkout", "--quiet", branch)
+
+
+def rev_parse(dest: str, ref: str = "HEAD") -> str:
+    return _run(dest, "rev-parse", ref)
+
+
+def reset_hard(dest: str, ref: str = "HEAD") -> str:
+    """把工作区硬重置到指定提交（回滚点，仅在冲突处理失败时使用）。"""
+    return _run(dest, "reset", "--hard", ref)
+
+
+def _has_conflicts(dest: str) -> bool:
+    try:
+        return bool(conflicted_files(dest))
+    except RuntimeError:
+        return False
+
+
+def merge_no_commit(dest: str, ref: str) -> tuple[bool, str]:
+    """把 ref 合并进当前分支，但**不自动提交**（保留解冲突的机会）。
+
+    返回 (是否无冲突, 输出)。有冲突时返回 (False, 输出) 且工作区处于合并中状态，
+    调用方必须显式地解决冲突并提交，或调用 abort_merge 放弃。
+    非冲突类失败（例如 ref 不存在）抛 RuntimeError。
+    """
+    cmd = ["git", "-C", dest, "merge", "--no-commit", "--no-ff", ref]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=900, env=_git_env())
+    out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    if proc.returncode == 0:
+        return True, out
+    if _has_conflicts(dest):
+        return False, out
+    raise RuntimeError(out or f"git merge {ref} 失败")
+
+
+def conflicted_files(dest: str) -> list:
+    """处于冲突状态的文件（相对工作区的路径）。"""
+    out = _run(dest, "diff", "--name-only", "--diff-filter=U")
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def take_side(dest: str, rel_path: str, side: str) -> str:
+    """冲突文件整体取某一侧内容（side ∈ {'ours','theirs'}）。"""
+    if side not in ("ours", "theirs"):
+        raise ValueError("side 只能是 ours 或 theirs")
+    return _run(dest, "checkout", f"--{side}", "--", _rel(dest, rel_path))
+
+
+def mark_resolved(dest: str, rel_path: str) -> str:
+    """把解决后的冲突文件标记为已解决（git add）。"""
+    return _run(dest, "add", "--", _rel(dest, rel_path))
+
+
+def abort_merge(dest: str) -> bool:
+    """放弃进行中的合并（没有合并在进行时返回 False，不抛异常）。"""
+    try:
+        _run(dest, "merge", "--abort")
+        return True
+    except RuntimeError:
+        try:
+            _run(dest, "reset", "--hard", "HEAD")
+        except RuntimeError:
+            pass
+        return False
+
+
+def commit_merge(dest: str, message: str, name: str | None = None,
+                 email: str | None = None) -> str:
+    """提交合并结果（含冲突解决），返回 commit 短哈希。"""
+    _run(dest, "config", "user.name", name or "CodeVoyage AI")
+    _run(dest, "config", "user.email", email or "3890320020@qq.com")
+    _run(dest, "add", "-A")
+    staged = _run(dest, "diff", "--cached", "--name-only")
+    if not staged:
+        raise RuntimeError("合并后没有产生任何改动")
+    _run(dest, "commit", "-m", message)
+    return _run(dest, "rev-parse", "--short", "HEAD")
