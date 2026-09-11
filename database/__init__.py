@@ -30,6 +30,13 @@ from database.db import (  # noqa: E402
     update_issue_result,
     list_issues,
     count_issues,
+    CRED_KINDS,
+    list_credentials,
+    get_credential,
+    add_credential,
+    update_credential,
+    delete_credential,
+    move_credential,
 )
 from database import db  # noqa: E402,F401
 from database import Issue  # noqa: E402,F401

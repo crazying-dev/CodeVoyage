@@ -22,6 +22,7 @@ load_dotenv()
 
 import database  # noqa: E402
 import mail  # noqa: E402
+import vault  # noqa: E402
 
 app = Flask(__name__, static_folder=None)
 database.init_db()
@@ -174,6 +175,122 @@ def repo_unbind():
     if not database.delete_repo_binding(data["id"], user["id"]):
         return _fail("binding not found", 404)
     return _ok({"message": "OK"})
+
+
+# ==================================================================
+#  用户凭据（GitHub Token / LLM 配置）：服务端加密存储
+#  列表接口只返回脱敏值；明文只在 /reveal 中返回给已登录的本人。
+# ==================================================================
+KIND_LABELS = {"github_token": "GitHub Token", "llm": "LLM API"}
+
+
+def _cred_public(cred: dict) -> dict:
+    secret = ""
+    try:
+        secret = vault.decrypt(cred["secret"])
+    except Exception:
+        secret = ""
+    item = {
+        "id": cred["id"],
+        "kind": cred["kind"],
+        "label": KIND_LABELS.get(cred["kind"], cred["kind"]),
+        "name": cred["name"],
+        "masked": vault.masked(secret),
+        "position": cred["position"],
+        "created_at": cred["created_at"],
+    }
+    if cred["kind"] == "llm":
+        extra = cred.get("extra") or {}
+        item["base_url"] = extra.get("base_url", "")
+        item["model"] = extra.get("model", "")
+    return item
+
+
+@app.route("/api/user/credentials/list", methods=["POST"])
+def credentials_list():
+    user = _auth_or_abort()
+    data = request.get_json(silent=True) or {}
+    kind = (data.get("kind") or "").strip() or None
+    items = [_cred_public(c) for c in database.list_credentials(user["id"], kind)]
+    return _ok({"message": "OK", "credentials": items, "crypto": vault.backend()})
+
+
+@app.route("/api/user/credentials/add", methods=["POST"])
+def credentials_add():
+    user = _auth_or_abort()
+    data = request.get_json(silent=True) or {}
+    kind = (data.get("kind") or "").strip()
+    value = (data.get("value") or "").strip()
+    if kind not in database.CRED_KINDS:
+        return _fail("kind invalid")
+    if not value:
+        return _fail("值不能为空")
+    extra = {}
+    if kind == "llm":
+        extra = {
+            "base_url": (data.get("base_url") or "").strip(),
+            "model": (data.get("model") or "").strip(),
+        }
+    cred = database.add_credential(user["id"], kind, vault.encrypt(value),
+                                   (data.get("name") or "").strip(), extra)
+    if not cred:
+        return _fail("保存失败")
+    return _ok({"message": "OK", "credential": _cred_public(cred)})
+
+
+@app.route("/api/user/credentials/update", methods=["POST"])
+def credentials_update():
+    user = _auth_or_abort()
+    data = request.get_json(silent=True) or {}
+    current = database.get_credential(user["id"], data.get("id"))
+    if not current:
+        return _fail("credential not found", 404)
+    extra = None
+    if current["kind"] == "llm":
+        extra = dict(current["extra"])
+        if "base_url" in data:
+            extra["base_url"] = (data.get("base_url") or "").strip()
+        if "model" in data:
+            extra["model"] = (data.get("model") or "").strip()
+    value = str(data.get("value") or "").strip()
+    cred = database.update_credential(
+        user["id"], current["id"],
+        secret=vault.encrypt(value) if value else None,
+        name=(data.get("name") or "").strip() or None,
+        extra=extra,
+    )
+    return _ok({"message": "OK", "credential": _cred_public(cred)})
+
+
+@app.route("/api/user/credentials/remove", methods=["POST"])
+def credentials_remove():
+    user = _auth_or_abort()
+    data = request.get_json(silent=True) or {}
+    return _ok({"message": "OK", "removed": database.delete_credential(user["id"], data.get("id"))})
+
+
+@app.route("/api/user/credentials/move", methods=["POST"])
+def credentials_move():
+    user = _auth_or_abort()
+    data = request.get_json(silent=True) or {}
+    moved = database.move_credential(user["id"], data.get("id"), (data.get("direction") or "").strip())
+    return _ok({"message": "OK", "moved": moved})
+
+
+@app.route("/api/user/credentials/reveal", methods=["POST"])
+def credentials_reveal():
+    """取回明文，仅供已登录本人的本机 Agent 调用。"""
+    user = _auth_or_abort()
+    data = request.get_json(silent=True) or {}
+    cred = database.get_credential(user["id"], data.get("id"))
+    if not cred:
+        return _fail("credential not found", 404)
+    try:
+        value = vault.decrypt(cred["secret"])
+    except Exception as e:
+        return _fail(f"解密失败：{e}")
+    return _ok({"message": "OK", "id": cred["id"], "kind": cred["kind"],
+                "value": value, "extra": cred["extra"]})
 
 
 # 生成给用户放置到仓库 .github/workflows/ 的 workflow 模板

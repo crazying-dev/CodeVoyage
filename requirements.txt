@@ -1,2 +1,4 @@
 flask
 python-dotenv
+# 可选：安装后凭据使用 Fernet 加密；不装则退回标准库实现（功能一致，强度略低）
+cryptography

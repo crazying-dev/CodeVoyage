@@ -173,6 +173,19 @@ def _ddl(engine: str) -> list:
             updated_at     TEXT    NOT NULL
         )""",
         "CREATE INDEX IF NOT EXISTS idx_issues_user_state ON issues(user_id, state)",
+        f"""
+        CREATE TABLE IF NOT EXISTS credentials (
+            id         {pk},
+            user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            kind       TEXT    NOT NULL,
+            name       TEXT    NOT NULL DEFAULT '',
+            secret     TEXT    NOT NULL DEFAULT '',
+            extra      TEXT    NOT NULL DEFAULT '{{}}',
+            position   INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT    NOT NULL,
+            updated_at TEXT    NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_credentials_user_kind ON credentials(user_id, kind, position)",
     ]
 
 
@@ -427,3 +440,140 @@ def count_issues(binding_id: int) -> int:
     with _conn() as conn:
         row = conn.execute("SELECT COUNT(*) AS c FROM issues WHERE repo_id=?", (binding_id,)).fetchone()
         return row["c"] if row else 0
+
+
+# ------------------------------ 凭据（GitHub Token / LLM） ------------------------------
+CRED_KINDS = ("github_token", "llm")
+
+
+def _cred_dict(row) -> dict | None:
+    if row is None:
+        return None
+    try:
+        extra = json.loads(row["extra"] or "{}")
+    except Exception:
+        extra = {}
+    if not isinstance(extra, dict):
+        extra = {}
+    return {
+        "id": row["id"],
+        "kind": row["kind"],
+        "name": row["name"] or "",
+        "secret": row["secret"] or "",
+        "extra": extra,
+        "position": row["position"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def list_credentials(user_id: int, kind: str | None = None) -> list:
+    with _conn() as conn:
+        if kind:
+            rows = conn.execute(
+                "SELECT * FROM credentials WHERE user_id=? AND kind=? ORDER BY position, id",
+                (user_id, kind),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM credentials WHERE user_id=? ORDER BY kind, position, id", (user_id,)
+            ).fetchall()
+        return [c for c in (_cred_dict(r) for r in rows) if c]
+
+
+def get_credential(user_id: int, cid) -> dict | None:
+    try:
+        cid = int(cid)
+    except (TypeError, ValueError):
+        return None
+    with _conn() as conn:
+        return _cred_dict(conn.execute(
+            "SELECT * FROM credentials WHERE id=? AND user_id=?", (cid, user_id)
+        ).fetchone())
+
+
+def add_credential(user_id: int, kind: str, secret: str, name: str = "", extra: dict | None = None) -> dict | None:
+    if kind not in CRED_KINDS or not secret:
+        return None
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(position), -1) AS m FROM credentials WHERE user_id=? AND kind=?",
+            (user_id, kind),
+        ).fetchone()
+        pos = (row["m"] if row else -1) + 1
+        new_id = conn.execute(
+            """INSERT INTO credentials (user_id, kind, name, secret, extra, position, created_at, updated_at)
+               VALUES(?,?,?,?,?,?,?,?) RETURNING id""",
+            (user_id, kind, name or "", secret, json.dumps(extra or {}, ensure_ascii=False),
+             pos, _now(), _now()),
+        ).fetchone()
+        if not new_id:
+            return None
+        return _cred_dict(conn.execute(
+            "SELECT * FROM credentials WHERE id=?", (new_id["id"],)
+        ).fetchone())
+
+
+def update_credential(user_id: int, cid, secret: str | None = None, name: str | None = None,
+                      extra: dict | None = None) -> dict | None:
+    current = get_credential(user_id, cid)
+    if not current:
+        return None
+    with _conn() as conn:
+        conn.execute(
+            "UPDATE credentials SET secret=?, name=?, extra=?, updated_at=? WHERE id=? AND user_id=?",
+            (
+                secret if secret is not None else current["secret"],
+                name if name is not None else current["name"],
+                json.dumps(extra if extra is not None else current["extra"], ensure_ascii=False),
+                _now(),
+                current["id"],
+                user_id,
+            ),
+        )
+        return _cred_dict(conn.execute(
+            "SELECT * FROM credentials WHERE id=?", (current["id"],)
+        ).fetchone())
+
+
+def delete_credential(user_id: int, cid) -> bool:
+    try:
+        cid = int(cid)
+    except (TypeError, ValueError):
+        return False
+    with _conn() as conn:
+        cur = conn.execute("DELETE FROM credentials WHERE id=? AND user_id=?", (cid, user_id))
+        return cur.rowcount > 0
+
+
+def move_credential(user_id: int, cid, direction: str) -> bool:
+    """在同类型凭据内上移/下移一位，用于调整回退顺序。"""
+    if direction not in ("up", "down"):
+        return False
+    with _conn() as conn:
+        current = _cred_dict(conn.execute(
+            "SELECT * FROM credentials WHERE id=? AND user_id=?", (cid, user_id)
+        ).fetchone())
+        if not current:
+            return False
+        if direction == "up":
+            other = conn.execute(
+                """SELECT * FROM credentials WHERE user_id=? AND kind=? AND (position < ? OR (position = ? AND id < ?))
+                   ORDER BY position DESC, id DESC LIMIT 1""",
+                (user_id, current["kind"], current["position"], current["position"], current["id"]),
+            ).fetchone()
+        else:
+            other = conn.execute(
+                """SELECT * FROM credentials WHERE user_id=? AND kind=? AND (position > ? OR (position = ? AND id > ?))
+                   ORDER BY position, id LIMIT 1""",
+                (user_id, current["kind"], current["position"], current["position"], current["id"]),
+            ).fetchone()
+        if not other:
+            return False
+        other = dict(other)
+        conn.execute("UPDATE credentials SET position=? WHERE id=? AND user_id=?",
+                     (other["position"], current["id"], user_id))
+        conn.execute("UPDATE credentials SET position=? WHERE id=? AND user_id=?",
+                     (current["position"], other["id"], user_id))
+        return True
+
