@@ -64,6 +64,22 @@ if __name__ == "__main__":
     print(f"本地存储目录：{info['base_dir']}（来源 {info['source']}）")
     threading.Thread(target=GetIssue.main, daemon=True).start()
     threading.Thread(target=Agent.main, daemon=True).start()
+    # 凭据（GitHub Token / LLM）存服务端：启动时后台迁移旧配置并同步缓存
+    from centre import credentials
+
+    threading.Thread(target=credentials.startup, daemon=True).start()
+    # GitHub 代理：两个组件都由 main 启动
+    #   发信组件（ProxySender）：向信令服务器要对方 IP、打洞、发信建隧道
+    #   接收组件（ProxyReceiver）：监听端口、登记自己的地址、替对方盲转发
+    from centre import proxy as cv_proxy
+    import ProxyReceiver
+    import ProxySender
+
+    threading.Thread(target=ProxySender.ensure_started, daemon=True).start()
+    if cv_proxy.status().get("as_helper"):
+        threading.Thread(target=ProxyReceiver.ensure_started, daemon=True).start()
+    if cv_proxy.status().get("enabled"):
+        threading.Thread(target=cv_proxy.local_start, daemon=True).start()
     if not os.getenv("CODEVOYAGE_NO_BROWSER"):
         threading.Thread(target=lambda: (time.sleep(1.5), _open_console()), daemon=True).start()
     _start_tray()

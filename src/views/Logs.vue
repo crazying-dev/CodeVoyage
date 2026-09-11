@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onActivated, onDeactivated, ref } from 'vue'
+import { onMounted, onUnmounted, ref } from 'vue'
 import { getJSON } from '../api'
 
 const logs = ref('')
@@ -31,12 +31,12 @@ function stopTimer() {
   }
 }
 
-onActivated(() => {
+onMounted(() => {
   refresh()
   startTimer()
 })
 
-onDeactivated(stopTimer)
+onUnmounted(stopTimer)
 </script>
 
 <template>

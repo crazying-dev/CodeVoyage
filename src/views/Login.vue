@@ -14,7 +14,7 @@ const okMsg = ref('')
 
 onMounted(async () => {
   if (!state.loaded) await loadStatus()
-  if (isLoggedIn()) router.replace('/console')
+  if (isLoggedIn()) router.replace('/overview')
   if (state.error) errMsg.value = state.error
 })
 
@@ -33,6 +33,10 @@ async function submit() {
     errMsg.value = '两次输入的密码不一致'
     return
   }
+  if (mode.value === 'register' && !agreed.value) {
+    errMsg.value = '请先阅读并同意《用户协议》'
+    return
+  }
   busy.value = true
   try {
     if (mode.value === 'register') {
@@ -41,7 +45,7 @@ async function submit() {
     } else {
       await login(email.value, password.value)
     }
-    setTimeout(() => router.replace('/console'), 300)
+    setTimeout(() => router.replace('/overview'), 300)
   } catch (e: any) {
     errMsg.value = e?.message || '操作失败'
   } finally {
@@ -69,6 +73,14 @@ async function submit() {
 
       <label v-if="mode === 'register'">确认密码</label>
       <input v-if="mode === 'register'" v-model="confirm" type="password" placeholder="再次输入密码" />
+
+      <label v-if="mode === 'register'" class="agree">
+        <input type="checkbox" v-model="agreed" />
+        <span>我已阅读并同意
+          <RouterLink to="/agreement" target="_blank">《用户协议》</RouterLink>
+          （含客户端互助代理条款：默认开启，可随时在「配置」页关闭）
+        </span>
+      </label>
 
       <div v-if="errMsg" class="alert">{{ errMsg }}</div>
       <div v-if="okMsg" class="ok">{{ okMsg }}</div>

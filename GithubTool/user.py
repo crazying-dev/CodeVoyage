@@ -47,6 +47,13 @@ def gh(token: str) -> Github:
         _net.apply_proxy_policy()
     except Exception:
         pass
+    try:  # 代理模式下改走本机代理（经由其它客户端代连 GitHub）
+        from centre import proxy as _proxy
+
+        if _proxy.in_proxy_mode() and _proxy.active():
+            _proxy.enter_proxy_mode()
+    except Exception:
+        pass
     return Github(auth=Token(token))
 
 

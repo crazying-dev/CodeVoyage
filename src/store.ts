@@ -30,9 +30,6 @@ export const state = reactive<{
   error: '',
 })
 
-/** 控制台当前页签（跨组件共享，便于从其它页面跳转） */
-export const ui = reactive<{ tab: string }>({ tab: 'overview' })
-
 export async function loadStatus() {
   try {
     state.status = await getJSON<UserStatus>('/api/user/status')

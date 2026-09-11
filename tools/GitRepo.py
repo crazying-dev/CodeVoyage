@@ -47,11 +47,23 @@ def _log(message: str) -> None:
 
 
 def _git_env() -> dict:
-    """git 子进程环境：默认剔除系统代理；仅当 CODEVOYAGE_PROXY 设置时启用代理。"""
+    """git 子进程环境：默认剔除系统代理；仅当 CODEVOYAGE_PROXY 设置时启用代理。
+
+    另外：当本机 GitHub 代理（centre.proxy）处于代理模式时，把 HTTPS 请求交给它的
+    本地 CONNECT 代理，从而在直连失败时经由其它客户端代连。
+    """
     env = os.environ.copy()
     for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
         env.pop(key, None)
     proxy = (os.getenv("CODEVOYAGE_PROXY") or "").strip()
+    if not proxy:
+        try:
+            from centre import proxy as cv_proxy
+
+            if cv_proxy.in_proxy_mode() and cv_proxy.active():
+                proxy = cv_proxy.local_proxy_url()
+        except Exception:
+            proxy = ""
     if proxy:
         env["HTTP_PROXY"] = env["http_proxy"] = proxy
         env["HTTPS_PROXY"] = env["https_proxy"] = proxy

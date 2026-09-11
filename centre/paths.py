@@ -96,6 +96,7 @@ BASE_DIR, BASE_SOURCE = _resolve_base_dir()
 USER_CONF_PATH = os.path.join(BASE_DIR, "user", "conf.json")
 LOCAL_CONF_PATH = os.path.join(BASE_DIR, "local.json")
 REPO_TOKENS_PATH = os.path.join(BASE_DIR, "repo_tokens.json")
+CRED_CACHE_PATH = os.path.join(BASE_DIR, "credentials_cache.json")
 SECRET_KEY_PATH = os.path.join(BASE_DIR, "secret.key")
 AGENT_DIR = os.path.join(BASE_DIR, "Agent")
 REPO_DIR = os.path.join(AGENT_DIR, "repo")
@@ -260,6 +261,26 @@ def mask(value: str, head: int = 4, tail: int = 4) -> str:
     return f"{value[:head]}{'*' * 6}{value[-tail:]}"
 
 
+# ------------------------------ 服务端凭据缓存 ------------------------------
+# 凭据（GitHub Token / LLM 配置）以服务端为准（加密存储），本机只保留一份混淆缓存，
+# 用于远端不可用时继续工作。结构与远端 list 接口对齐：
+#   {"github_tokens": [...], "repo_tokens": {"owner/name": [...]}, "llm": [{...}]}
+def save_cred_cache(data: dict) -> None:
+    _save_json(CRED_CACHE_PATH, {"blob": _encrypt(json.dumps(data or {}, ensure_ascii=False))})
+
+
+def load_cred_cache() -> dict:
+    raw = _load_json(CRED_CACHE_PATH)
+    blob = str(raw.get("blob") or "")
+    if not blob:
+        return {}
+    try:
+        data = json.loads(_decrypt(blob) or "{}")
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 # ------------------------------ 仓库专属令牌（细粒度，支持多个并存） ------------------------------
 def _normalize_token_list(value) -> list:
     """兼容旧的单值写法，统一成去重后的列表。"""
@@ -290,8 +311,8 @@ def _decode_token(enc) -> str:
     return ""
 
 
-def load_repo_tokens_map() -> dict:
-    """返回 {repo_full: [明文令牌, ...]}；仅本机使用（兼容旧的单值格式）。"""
+def _local_repo_tokens_map() -> dict:
+    """迁移前的本地实现：从 repo_tokens.json 读取。"""
     raw = _load_json(REPO_TOKENS_PATH)
     result = {}
     for repo_full, value in raw.items():
@@ -305,16 +326,30 @@ def load_repo_tokens_map() -> dict:
     return result
 
 
+def load_repo_tokens_map() -> dict:
+    """返回 {repo_full: [明文令牌, ...]}，优先取服务端缓存，其次迁移前的本地数据。"""
+    cached = load_cred_cache().get("repo_tokens")
+    if isinstance(cached, dict) and cached:
+        out = {}
+        for repo_full, tokens in cached.items():
+            items = [str(t) for t in _normalize_token_list(tokens)]
+            if items:
+                out[str(repo_full)] = items
+        if out:
+            return out
+    return _local_repo_tokens_map()
+
+
 def load_repo_tokens(repo_full: str) -> list:
     return load_repo_tokens_map().get(repo_full, [])
 
 
 def add_repo_token(repo_full: str, token: str) -> None:
-    """追加一个仓库专属令牌（不覆盖已有，避免重复加密）。"""
+    """（迁移用）本地追加一个仓库专属令牌。"""
     token = (token or "").strip()
     if not token:
         return
-    plain = load_repo_tokens(repo_full)  # 已解密的明文列表
+    plain = _local_repo_tokens_map().get(repo_full, [])
     if token not in plain:
         plain.append(token)
     raw = _load_json(REPO_TOKENS_PATH)
@@ -323,8 +358,8 @@ def add_repo_token(repo_full: str, token: str) -> None:
 
 
 def remove_repo_token(repo_full: str, index: int | None = None, token: str | None = None) -> None:
-    """按序号或按明文令牌删除某个仓库令牌。"""
-    plain = load_repo_tokens(repo_full)
+    """（迁移用）按序号或按明文令牌删除某个本地仓库令牌。"""
+    plain = _local_repo_tokens_map().get(repo_full, [])
     keep = [t for i, t in enumerate(plain)
             if not ((index is not None and i == index) or (token is not None and t == token))]
     raw = _load_json(REPO_TOKENS_PATH)
@@ -336,7 +371,7 @@ def remove_repo_token(repo_full: str, index: int | None = None, token: str | Non
 
 
 def clear_repo_token(repo_full: str) -> None:
-    """清空某个仓库的全部专属令牌。"""
+    """（迁移用）清空某个仓库的本地专属令牌。"""
     raw = _load_json(REPO_TOKENS_PATH)
     if repo_full in raw:
         raw.pop(repo_full)
@@ -344,8 +379,8 @@ def clear_repo_token(repo_full: str) -> None:
 
 
 # ------------------------------ 全局令牌（传统，支持多个并存） ------------------------------
-def load_global_tokens() -> list:
-    """全局令牌列表；兼容旧的单值 github_token（两者都可能是混淆后的密文）。"""
+def _local_global_tokens() -> list:
+    """迁移前的本地实现：从 local.json 读取。"""
     conf = _load_json(LOCAL_CONF_PATH)
     raw_list = _normalize_token_list(conf.get("github_tokens"))
     legacy = conf.get("github_token")
@@ -359,7 +394,18 @@ def load_global_tokens() -> list:
     return out
 
 
+def load_global_tokens() -> list:
+    """全局（传统）令牌列表，顺序即回退顺序。优先服务端缓存，其次迁移前的本地数据。"""
+    cached = load_cred_cache().get("github_tokens")
+    if isinstance(cached, list) and cached:
+        items = [str(t) for t in _normalize_token_list(cached)]
+        if items:
+            return items
+    return _local_global_tokens()
+
+
 def save_global_tokens(tokens: list) -> None:
+    """（迁移用）写入本地全局令牌列表。"""
     conf = _load_json(LOCAL_CONF_PATH)
     conf["github_tokens"] = [_encrypt(t) for t in _normalize_token_list(tokens)]
     conf.pop("github_token", None)
@@ -368,7 +414,7 @@ def save_global_tokens(tokens: list) -> None:
 
 def add_global_token(token: str) -> list:
     token = (token or "").strip()
-    tokens = load_global_tokens()
+    tokens = _local_global_tokens()
     if token and token not in tokens:
         tokens.append(token)
     save_global_tokens(tokens)
@@ -376,20 +422,53 @@ def add_global_token(token: str) -> list:
 
 
 def remove_global_token(index: int | None = None, token: str | None = None) -> list:
-    tokens = load_global_tokens()
+    tokens = _local_global_tokens()
     keep = [t for i, t in enumerate(tokens) if not ((index is not None and i == index) or (token is not None and t == token))]
     save_global_tokens(keep)
     return keep
 
 
 def move_global_token(index: int, delta: int) -> list:
-    """调整全局令牌顺序（顺序即回退尝试顺序）。"""
-    tokens = load_global_tokens()
+    tokens = _local_global_tokens()
     target = index + delta
     if 0 <= index < len(tokens) and 0 <= target < len(tokens):
         tokens[index], tokens[target] = tokens[target], tokens[index]
         save_global_tokens(tokens)
     return tokens
+
+
+# ------------------------------ LLM 配置（多条并存，顺序即回退顺序） ------------------------------
+def load_llm_configs() -> list:
+    """返回 [{id, name, api_key, base_url, model}, ...]；优先服务端缓存，其次迁移前的本地单条。"""
+    cached = load_cred_cache().get("llm")
+    if isinstance(cached, list):
+        items = []
+        for c in cached:
+            if not isinstance(c, dict):
+                continue
+            key = str(c.get("api_key") or "").strip()
+            if key:
+                items.append({
+                    "id": c.get("id"),
+                    "name": c.get("name") or "",
+                    "api_key": key,
+                    "base_url": str(c.get("base_url") or "").strip(),
+                    "model": str(c.get("model") or "").strip(),
+                })
+        if items:
+            return items
+    conf = _load_json(LOCAL_CONF_PATH)
+    local = {k: _decrypt(v) for k, v in conf.items()}
+    key = (local.get("llm_api_key") or "").strip()
+    if key:
+        return [{
+            "id": None,
+            "name": "本地配置",
+            "api_key": key,
+            "base_url": (local.get("llm_base_url") or "").strip(),
+            "model": (local.get("llm_model") or "").strip(),
+        }]
+    return []
 
 
 # ------------------------------ 令牌解析（顺序回退） ------------------------------

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onActivated, onDeactivated, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { postJSON, getJSON } from '../api'
 import { state } from '../store'
 
@@ -27,17 +27,48 @@ interface Overview {
   logs: string
 }
 
+interface LatencyProbe {
+  ok: boolean
+  status: number
+  ms: number
+  reason: string
+}
+
 const data = ref<Overview | null>(null)
 const err = ref('')
 const now = ref(Date.now())
+const latency = ref<{ api: LatencyProbe; git: LatencyProbe } | null>(null)
+const latencyAt = ref('')
 let timer: number | null = null
 let ticker: number | null = null
+let latTimer: number | null = null
 
 const activity = computed(() => data.value?.state)
 const statusText = computed(() => {
   const s = activity.value?.status || 'idle'
   return s
 })
+
+async function refreshLatency() {
+  try {
+    latency.value = await postJSON('/api/local/github-latency', {})
+    latencyAt.value = new Date().toLocaleTimeString()
+  } catch {
+    /* 探测失败时保留上一次结果 */
+  }
+}
+
+function latClass(p?: LatencyProbe): string {
+  if (!p || !p.ok) return 'failed'
+  if (p.ms < 400) return 'ok'
+  if (p.ms < 1200) return 'waiting'
+  return 'failed'
+}
+
+function latText(p?: LatencyProbe): string {
+  if (!p) return '检测中'
+  return p.ok ? `${p.ms} ms` : '不通'
+}
 
 async function refresh() {
   try {
@@ -63,7 +94,7 @@ function remain(t: Task): number {
   return Math.max(0, Math.ceil(t.confirm_due - now.value / 1000))
 }
 
-onActivated(() => {
+onMounted(() => {
   refresh()
   refreshLatency()
   timer = window.setInterval(refresh, 2000)
@@ -71,7 +102,7 @@ onActivated(() => {
   latTimer = window.setInterval(refreshLatency, 10000)
 })
 
-onDeactivated(() => {
+onUnmounted(() => {
   if (timer) clearInterval(timer)
   if (ticker) clearInterval(ticker)
   if (latTimer) clearInterval(latTimer)

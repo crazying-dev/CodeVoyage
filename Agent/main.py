@@ -2,20 +2,22 @@
 
 一次任务流程：
 1. 克隆仓库到临时工作区，创建分支；
-2. 组装系统提示（含工作区边界）与 Issue 内容，调用 LLM；
+2. 组装系统提示（含工作区边界）与 Issue 内容，调用 LLM（多条 LLM 配置按顺序回退）；
 3. LLM 通过工具（read_file/write_file/list_dir/plan）在工作区内完成修改；
-4. 解析最终答复中的 Conclusion，作为提交信息；
-5. git 提交并推送分支，调用 GitHub API 创建 Pull Request；
-6. 返回结果由上层回执给远端。
+4. 全过程写入执行轨迹（centre.trace），控制台可实时查看与事后回看；
+5. 解析最终答复中的 Conclusion，作为提交信息；
+6. git 提交并推送分支，调用 GitHub API 创建 Pull Request；
+7. 返回结果由上层回执给远端。
 
-LLM Key 与 GitHub PAT 均从本地配置读取（~/.CodeVoyage/local.json，混淆落盘），绝不外传。
+凭据来源：GitHub PAT / LLM Key 存于服务端（加密），本机只保留同步缓存（centre.credentials）；
+提交身份仍取本机配置。
 """
 import json
 import os
 
 import config
 import Info
-from centre import core, paths
+from centre import core, credentials, paths, proxy, trace
 
 _MAX_ITERATIONS = 80
 
@@ -24,19 +26,22 @@ class AgentError(Exception):
     pass
 
 
-def _client():
-    local = paths.load_local_conf()
-    key = (local.get("llm_api_key") or "").strip()
-    if not key:
-        raise AgentError("未配置 LLM API Key，请在控制台「本地配置」中填写")
-    from openai import OpenAI
-
-    base = (local.get("llm_base_url") or Info.Agent.base_url).strip() or Info.Agent.base_url
-    return OpenAI(api_key=key, base_url=base)
-
-
-def _model(local: dict) -> str:
-    return (local.get("llm_model") or Info.Agent.model).strip() or Info.Agent.model
+def _llm_candidates() -> list:
+    """按顺序返回可用的 LLM 配置（存服务端，多条并存，前者失败自动回退）。"""
+    out = []
+    for c in paths.load_llm_configs():
+        api_key = (c.get("api_key") or "").strip()
+        if not api_key:
+            continue
+        model = (c.get("model") or "").strip() or Info.Agent.model
+        out.append({
+            "id": c.get("id"),
+            "name": (c.get("name") or "").strip() or model,
+            "api_key": api_key,
+            "base_url": (c.get("base_url") or Info.Agent.base_url).strip() or Info.Agent.base_url,
+            "model": model,
+        })
+    return out
 
 
 def _save_history(repo_full: str, messages: list) -> None:
@@ -88,23 +93,32 @@ def _build_issue_prompt(task: dict) -> str:
 
 def run_task(task: dict) -> dict:
     """执行单个 Issue 任务，返回 {status, pr_url, conclusion}。异常以 AgentError 抛出。"""
-    local = paths.load_local_conf()
     repo_full = task["repo_full"]
+    uid = task.get("uuid", "")
+    issue_number = task.get("issue_number")
+
+    # 令牌存服务端，先尽力同步一次（远端不可用时沿用本机缓存）
+    try:
+        credentials.sync()
+    except Exception:
+        pass
     # 候选令牌（顺序即尝试顺序）：仓库专属（细粒度）→ 全局（传统）
     token_candidates = paths.resolve_tokens(repo_full)
     if not token_candidates:
         raise AgentError(
-            f"仓库 {repo_full} 没有可用令牌：请在「仓库绑定」页填写该仓库的细粒度令牌，"
-            "或在「本地配置」页填写全局传统令牌"
+            f"仓库 {repo_full} 没有可用令牌：请在「配置」页为该仓库添加细粒度令牌，"
+            "或添加全局传统令牌"
         )
-    if not (local.get("llm_api_key") or "").strip():
-        raise AgentError("未配置 LLM API Key，请在控制台「本地配置」中填写")
+    llm_candidates = _llm_candidates()
+    if not llm_candidates:
+        raise AgentError("未配置 LLM API Key，请在控制台「配置」页添加")
 
-    issue_number = task.get("issue_number")
-    branch = f"codevoyage/issue-{issue_number}-{task.get('uuid', '')[:6]}"
-    dest = os.path.join(paths.repo_dir(repo_full), "work", task.get("uuid", "run"))
+    branch = f"codevoyage/issue-{issue_number}-{uid[:6]}"
+    dest = os.path.join(paths.repo_dir(repo_full), "work", uid or "run")
 
-    core.set_activity({"running_uuid": task.get("uuid", ""), "status": "running", "note": "克隆仓库"})
+    trace.start(repo_full, task)
+    core.set_activity({"running_uuid": uid, "repo_full": repo_full,
+                       "status": "running", "note": "克隆仓库"})
     os.makedirs(os.path.dirname(dest), exist_ok=True)
 
     from tools import GitRepo, ReadFile
@@ -117,10 +131,12 @@ def run_task(task: dict) -> dict:
             try:
                 GitRepo.clone(repo_full, cand_token, dest)
                 gh_token, token_source = cand_token, cand_source
-                paths.append_log(
-                    f"[{repo_full}#{issue_number}] 克隆成功（第 {idx} 个令牌，来源 "
+                note = (
+                    f"克隆成功（第 {idx} 个令牌，来源 "
                     f"{'仓库专属/细粒度' if cand_source == 'repo' else '全局/传统'}）"
                 )
+                paths.append_log(f"[{repo_full}#{issue_number}] {note}")
+                trace.append(repo_full, uid, {"type": "note", "content": note})
                 break
             except Exception as e:
                 clone_error = e
@@ -136,60 +152,27 @@ def run_task(task: dict) -> dict:
         try:
             from GithubTool import user as gh_user
 
-            default = gh_user.default_branch(gh_token, repo_full)
+            default = proxy.github_call(gh_user.default_branch, gh_token, repo_full)
         except Exception:
-            default = GitRepo.current_branch(dest)
+            default = ""
         if not default:
             default = GitRepo.current_branch(dest)
 
         GitRepo.create_branch(dest, branch)
         ReadFile.set_workspace(dest)
 
-        # ---------------- 组装并调用 LLM ----------------
+        # ---------------- 组装提示（带上一轮会话摘要，实现会话复用） ----------------
         work_abs = os.path.abspath(dest)
         system = config.AgentSystem.replace("你的工作区在 xxx", f"你的工作区在 {work_abs}")
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": _build_issue_prompt(task)},
-        ]
-        _save_history(repo_full, messages)
+        messages = [{"role": "system", "content": system}]
+        recap = _session_recap(paths.load_json(paths.history_file(repo_full), {}) or {})
+        if recap:
+            messages.append({"role": "assistant", "content": recap})
+            trace.append(repo_full, uid, {"type": "session", "content": recap})
+            paths.append_log(f"[{repo_full}#{issue_number}] 复用上一轮会话摘要（{len(recap)} 字）")
+        messages.append({"role": "user", "content": _build_issue_prompt(task)})
 
-        client = _client()
-        model = _model(local)
-        final_content = ""
-        iteration = 0
-        while iteration < _MAX_ITERATIONS:
-            iteration += 1
-            core.set_activity({"note": f"调用 AI（第 {iteration} 轮）"})
-            try:
-                response = client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    tools=Info.Agent.tools,
-                    tool_choice="auto",
-                    stream=False,
-                )
-            except Exception as e:
-                raise AgentError(f"AI 调用失败：{e}")
-
-            msg = response.choices[0].message
-            finish_reason = response.choices[0].finish_reason
-            if finish_reason == "tool_calls" and msg.tool_calls:
-                dumped = msg.model_dump(exclude_none=True)
-                messages.append(dumped)
-                for tc in msg.tool_calls:
-                    result = _exec_tool(tc.function.name, tc.function.arguments)
-                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
-                _save_history(repo_full, messages)
-                continue
-            final_content = (msg.content or "").strip()
-            messages.append({"role": "assistant", "content": final_content})
-            _save_history(repo_full, messages)
-            if not final_content:
-                raise AgentError("AI 未返回任何内容")
-            break
-        else:
-            raise AgentError(f"AI 工具循环超过 {_MAX_ITERATIONS} 轮仍未结束")
+        final_content = _run_llm_loop(repo_full, uid, messages, llm_candidates, issue_number)
 
         # ---------------- 提交、推送、建 PR ----------------
         conclusion = _extract_conclusion(final_content)
@@ -200,17 +183,107 @@ def run_task(task: dict) -> dict:
         core.set_activity({"note": "git 提交并推送"})
         git_name, git_email = paths.git_identity()
         GitRepo.commit_all(dest, commit_message, name=git_name, email=git_email)
+        trace.append(repo_full, uid, {"type": "note", "content": f"已提交：{commit_message[:200]}"})
         GitRepo.push(dest, repo_full, gh_token, branch)
 
         from GithubTool import user as gh_user
 
-        pr_url = gh_user.create_pr(gh_token, repo_full, branch, default, pr_title, pr_body)
+        pr_url = proxy.github_call(gh_user.create_pr, gh_token, repo_full, branch, default,
+                                   pr_title, pr_body)
         paths.append_log(f"[{repo_full}#{issue_number}] 已创建 PR: {pr_url}")
+        trace.append(repo_full, uid, {"type": "note", "content": f"已创建 PR：{pr_url}"})
+        trace.finish(repo_full, uid, "ok")
         return {"status": "ok", "pr_url": pr_url, "conclusion": conclusion}
+    except Exception as e:
+        trace.append(repo_full, uid, {"type": "error", "content": str(e)})
+        trace.finish(repo_full, uid, "failed", str(e))
+        raise
     finally:
         # 成功/失败都清理临时克隆，避免磁盘膨胀
         GitRepo.remove_dir(dest)
         ReadFile.set_workspace("")
+
+
+def _session_recap(history: dict) -> str:
+    """从上一次会话里取最后一段 AI 结论，作为本轮参考（会话复用）。"""
+    messages = (history or {}).get("messages") or []
+    answers = [
+        str(m.get("content") or "").strip()
+        for m in messages
+        if isinstance(m, dict) and m.get("role") == "assistant" and str(m.get("content") or "").strip()
+    ]
+    if not answers:
+        return ""
+    last = answers[-1]
+    if len(last) > 1500:
+        last = last[:1500] + "…"
+    return "上一轮任务的处理结论（供本次参考，可直接复用相关判断）：\n" + last
+
+
+def _run_llm_loop(repo_full: str, uid: str, messages: list, llm_candidates: list, issue_number) -> str:
+    """工具调用循环：把思考 / 工具调用 / 结果 / 最终回答写入执行轨迹；LLM 配置按顺序回退。"""
+    from openai import OpenAI
+
+    preferred = 0
+    iteration = 0
+    while iteration < _MAX_ITERATIONS:
+        iteration += 1
+        core.set_activity({"note": f"调用 AI（第 {iteration} 轮）"})
+        response = None
+        last_error = None
+        order = list(range(len(llm_candidates)))
+        order = order[preferred:] + order[:preferred]
+        for idx in order:
+            cfg = llm_candidates[idx]
+            client = OpenAI(api_key=cfg["api_key"], base_url=cfg["base_url"])
+            try:
+                response = client.chat.completions.create(
+                    model=cfg["model"],
+                    messages=messages,
+                    tools=Info.Agent.tools,
+                    tool_choice="auto",
+                    stream=False,
+                )
+                preferred = idx
+                break
+            except Exception as e:
+                last_error = e
+                paths.append_log(f"[{repo_full}#{issue_number}] LLM 配置「{cfg['name']}」调用失败：{e}")
+                trace.append(repo_full, uid, {
+                    "type": "error", "iteration": iteration,
+                    "content": f"LLM 配置「{cfg['name']}」调用失败：{e}",
+                })
+        if response is None:
+            raise AgentError(f"全部 {len(llm_candidates)} 个 LLM 配置都调用失败：{last_error}")
+
+        msg = response.choices[0].message
+        finish_reason = response.choices[0].finish_reason
+        if finish_reason == "tool_calls" and msg.tool_calls:
+            thinking = (msg.content or "").strip()
+            if thinking:
+                trace.append(repo_full, uid, {"type": "thinking", "iteration": iteration,
+                                              "content": thinking})
+            messages.append(msg.model_dump(exclude_none=True))
+            for tc in msg.tool_calls:
+                trace.append(repo_full, uid, {"type": "tool_call", "iteration": iteration,
+                                              "tool": tc.function.name,
+                                              "content": tc.function.arguments or ""})
+                result = _exec_tool(tc.function.name, tc.function.arguments)
+                messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+                trace.append(repo_full, uid, {"type": "tool_result", "iteration": iteration,
+                                              "tool": tc.function.name,
+                                              "content": str(result)[:2000]})
+            _save_history(repo_full, messages)
+            continue
+        final_content = (msg.content or "").strip()
+        messages.append({"role": "assistant", "content": final_content})
+        _save_history(repo_full, messages)
+        if not final_content:
+            raise AgentError("AI 未返回任何内容")
+        trace.append(repo_full, uid, {"type": "answer", "iteration": iteration,
+                                      "content": final_content})
+        return final_content
+    raise AgentError(f"AI 工具循环超过 {_MAX_ITERATIONS} 轮仍未结束")
 
 
 def _extract_conclusion(markdown: str) -> str:
@@ -233,13 +306,17 @@ def _extract_conclusion(markdown: str) -> str:
 
 # ------------------------------ 兼容旧入口（仅调试） ------------------------------
 def call_ai(message: str = "") -> str:
-    local = paths.load_local_conf()
-    client = _client()
-    model = _model(local)
+    candidates = _llm_candidates()
+    if not candidates:
+        return "未配置 LLM API Key"
+    cfg = candidates[0]
+    from openai import OpenAI
+
+    client = OpenAI(api_key=cfg["api_key"], base_url=cfg["base_url"])
     messages = [{"role": "user", "content": message or "你好"}]
     try:
         resp = client.chat.completions.create(
-            model=model, messages=messages, tools=Info.Agent.tools, tool_choice="auto", stream=False
+            model=cfg["model"], messages=messages, tools=Info.Agent.tools, tool_choice="auto", stream=False
         )
     except Exception as e:
         return f"调用失败：{e}"

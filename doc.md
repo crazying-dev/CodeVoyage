@@ -43,10 +43,10 @@ jobs:
       - name: Post event to my backend
         uses: fjogeleit/http-request-action@v1
         with:
-          url: ${{ secrets.BACKEND_WEBHOOK_URL }}
+          url: https://你的服务端/api/Github/Issue
           method: POST
           contentType: application/json
-          bearerToken: ${{ secrets.BACKEND_WEBHOOK_SECRET }}
+          bearerToken: 与服务端 .env 中 WEBHOOK_SECRET 一致
           data: >
             {
               "event_type":"issue_opened",
@@ -58,9 +58,20 @@ jobs:
               "repository_id":"${{ github.repository_id }}"
             }
 ```
-仓库Secrets配置：
-- `BACKEND_WEBHOOK_URL`：你的后端公网接口地址
-- `BACKEND_WEBHOOK_SECRET`：签名密钥，防止伪造请求
+> 地址与签名密钥由控制台生成 workflow 时**直接写死进文件**，不再需要配置仓库 Secrets。
+> 实际下发的模板见 `CodeVoyage-server/app.py` 的 `WORKFLOW_TEMPLATE`（含关键词匹配、作者白名单、curl 上报）。
+
+---
+
+### ①.5 凭据存储（GitHub Token / LLM 配置）
+
+用户的 GitHub Token（传统 / 细粒度 / 仓库专属）与 LLM 配置（多条并存、按顺序回退）统一存于**服务端**，
+落库前加密（`CodeVoyage-server/vault.py`），控制台接口只返回脱敏值。
+本机 `~/.CodeVoyage/credentials_cache.json` 只保留一份混淆缓存，用于远端不可用时继续执行任务。
+
+- 服务端接口：`/api/user/credentials/{list,add,update,remove,move,reveal}`
+- 客户端封装：`CodeVoyage/centre/credentials.py`（同步、迁移旧的本机配置）
+- 首次同步会把迁移前存在本机的令牌 / LLM 配置自动上传到服务端
 
 ---
 

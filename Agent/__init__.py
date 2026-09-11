@@ -11,7 +11,7 @@
 import time
 
 import Agent.main as runner
-from centre import core, paths, remote
+from centre import core, notify, paths, remote
 
 
 def _report(uuid: str, status: str, pr_url: str = "", error: str = "") -> None:

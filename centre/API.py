@@ -11,7 +11,7 @@ import threading
 
 from flask import jsonify, request
 
-from centre import core, net, paths, remote
+from centre import core, credentials, net, paths, remote, trace
 
 
 def register(app):
@@ -29,6 +29,7 @@ def register(app):
             return jsonify({"message": str(e)}), 500
         except Exception as e:
             return jsonify({"message": f"无法连接远端服务：{e}"}), 502
+        threading.Thread(target=credentials.startup, daemon=True).start()
         return jsonify({"message": "OK", "email": conf["email"], "ID": conf["ID"]})
 
     @app.route("/api/user/register", methods=["POST"])
@@ -42,18 +43,26 @@ def register(app):
             return jsonify({"message": str(e)}), 500
         except Exception as e:
             return jsonify({"message": f"无法连接远端服务：{e}"}), 502
+        threading.Thread(target=credentials.startup, daemon=True).start()
         return jsonify({"message": "OK", "email": conf["email"], "ID": conf["ID"]})
 
     @app.route("/api/user/logout", methods=["POST"])
     def user_logout():
         paths.clear_user_conf()
+        # 凭据缓存在本机，退出登录必须一并清掉，避免下一个账号复用
+        credentials.invalidate()
+        try:
+            paths.save_cred_cache({})
+        except Exception:
+            pass
         return jsonify({"message": "OK"})
 
     @app.route("/api/user/status", methods=["GET", "POST"])
     def user_status():
         conf = paths.load_user_conf()
-        local = paths.load_local_conf()
         global_tokens = paths.load_global_tokens()
+        llm_configs = paths.load_llm_configs()
+        first_llm = llm_configs[0] if llm_configs else {}
         return jsonify({
             "message": "OK",
             "logged_in": bool(conf),
@@ -65,10 +74,11 @@ def register(app):
             "github_tokens": paths.token_hint_list(global_tokens),
             "github_token_count": len(global_tokens),
             "github_token_hint": paths.mask(global_tokens[0]) if global_tokens else "",
-            "llm_configured": bool(local.get("llm_api_key")),
-            "llm_api_key_hint": paths.mask(local.get("llm_api_key")),
-            "llm_base_url": local.get("llm_base_url") or "",
-            "llm_model": local.get("llm_model") or "",
+            "llm_configured": bool(llm_configs),
+            "llm_count": len(llm_configs),
+            "llm_api_key_hint": paths.mask(first_llm.get("api_key", "")),
+            "llm_base_url": first_llm.get("base_url", ""),
+            "llm_model": first_llm.get("model", ""),
             "git_name": paths.git_identity()[0],
             "git_email": paths.git_identity()[1],
         })
@@ -158,26 +168,64 @@ def register(app):
         return jsonify(body), resp.status_code
 
     # ---------------------------------------------------------------
-    # 全局令牌列表（传统，支持多个并存，顺序即回退尝试顺序）
+    # 凭据（GitHub Token / LLM）：存服务端（加密），本机只读缓存
     # ---------------------------------------------------------------
+    @app.route("/api/local/credentials", methods=["POST"])
+    def credentials_overview():
+        """配置页用：脱敏列表（顺序即回退顺序）+ 本机缓存状态。"""
+        try:
+            items = credentials.list_items()
+            error = ""
+        except Exception as e:
+            items, error = [], str(e)
+        cached = paths.load_cred_cache()
+        return jsonify({
+            "message": "OK",
+            "credentials": items,
+            "github_tokens": [c for c in items
+                              if c.get("kind") == "github_token" and not c.get("repo")],
+            "llm": [c for c in items if c.get("kind") == "llm"],
+            "cached": {
+                "github_tokens": len(cached.get("github_tokens") or []),
+                "llm": len(cached.get("llm") or []),
+                "repo_tokens": sum(len(v) for v in (cached.get("repo_tokens") or {}).values()),
+            },
+            "error": error,
+        })
+
+    @app.route("/api/local/credentials/sync", methods=["POST"])
+    def credentials_sync_now():
+        try:
+            data = credentials.sync(force=True)
+        except Exception as e:
+            return jsonify({"message": f"同步失败：{e}"}), 502
+        return jsonify({"message": "OK",
+                        "github_token_count": len(data.get("github_tokens") or []),
+                        "llm_count": len(data.get("llm") or [])})
+
     @app.route("/api/local/tokens", methods=["POST"])
     def global_tokens_manage():
+        """全局（传统）令牌：增删与顺序调整都写服务端。"""
         data = request.get_json(silent=True) or {}
         action = (data.get("action") or "add").strip()
-        if action == "add":
-            token = (data.get("token") or "").strip()
-            if not token:
-                return jsonify({"message": "token missing"}), 400
-            tokens = paths.add_global_token(token)
-        elif action == "remove":
-            tokens = paths.remove_global_token(index=data.get("index"), token=data.get("token"))
-        elif action == "clear":
-            paths.save_global_tokens([])
-            tokens = []
-        elif action == "move":
-            tokens = paths.move_global_token(int(data.get("index", 0)), int(data.get("delta", 0)))
-        else:
-            return jsonify({"message": "unknown action"}), 400
+        try:
+            if action == "add":
+                token = (data.get("token") or "").strip()
+                if not token:
+                    return jsonify({"message": "token missing"}), 400
+                credentials.add_token(token, name=(data.get("name") or "").strip())
+            elif action == "remove":
+                credentials.remove_item(data.get("id"))
+            elif action == "move":
+                credentials.move_item(data.get("id"),
+                                      "up" if int(data.get("delta", -1)) < 0 else "down")
+            else:
+                return jsonify({"message": "unknown action"}), 400
+        except remote.RemoteError as e:
+            return jsonify({"message": e.message}), e.code
+        except Exception as e:
+            return jsonify({"message": f"保存失败：{e}"}), 502
+        tokens = paths.load_global_tokens()
         return jsonify({
             "message": "OK",
             "github_tokens": paths.token_hint_list(tokens),
@@ -185,8 +233,48 @@ def register(app):
             "github_configured": bool(tokens),
         })
 
+    @app.route("/api/local/llm", methods=["POST"])
+    def llm_manage():
+        """LLM 配置：多条并存，顺序即回退顺序；统一存服务端。"""
+        data = request.get_json(silent=True) or {}
+        action = (data.get("action") or "add").strip()
+        try:
+            if action == "add":
+                key = (data.get("api_key") or "").strip()
+                if not key:
+                    return jsonify({"message": "api_key missing"}), 400
+                credentials.add_llm(key, (data.get("base_url") or "").strip(),
+                                    (data.get("model") or "").strip(),
+                                    (data.get("name") or "").strip())
+            elif action == "update":
+                credentials.update_item(data.get("id"),
+                                        value=(data.get("api_key") or "").strip() or None,
+                                        name=data.get("name"),
+                                        base_url=(data.get("base_url") or "").strip(),
+                                        model=(data.get("model") or "").strip())
+            elif action == "remove":
+                credentials.remove_item(data.get("id"))
+            elif action == "move":
+                credentials.move_item(data.get("id"),
+                                      "up" if int(data.get("delta", -1)) < 0 else "down")
+            else:
+                return jsonify({"message": "unknown action"}), 400
+        except remote.RemoteError as e:
+            return jsonify({"message": e.message}), e.code
+        except Exception as e:
+            return jsonify({"message": f"保存失败：{e}"}), 502
+        configs = paths.load_llm_configs()
+        return jsonify({
+            "message": "OK",
+            "llm_count": len(configs),
+            "llm_configured": bool(configs),
+            "llm_api_key_hint": paths.mask(configs[0]["api_key"]) if configs else "",
+            "llm_base_url": configs[0]["base_url"] if configs else "",
+            "llm_model": configs[0]["model"] if configs else "",
+        })
+
     # ---------------------------------------------------------------
-    # 仓库专属令牌（细粒度，支持多个并存）：绑定/编辑仓库时维护
+    # 仓库专属令牌（细粒度）：同样存服务端，用 extra.repo 标记归属
     # ---------------------------------------------------------------
     @app.route("/api/local/repo-token", methods=["POST"])
     def repo_token_manage():
@@ -197,17 +285,22 @@ def register(app):
             return jsonify({"message": "owner or name missing"}), 400
         repo_full = f"{owner}/{name}"
         action = (data.get("action") or ("clear" if data.get("clear") else "add")).strip()
-        if action == "add":
-            token = (data.get("token") or "").strip()
-            if not token:
-                return jsonify({"message": "token missing"}), 400
-            paths.add_repo_token(repo_full, token)
-        elif action == "remove":
-            paths.remove_repo_token(repo_full, index=data.get("index"), token=data.get("token"))
-        elif action == "clear":
-            paths.clear_repo_token(repo_full)
-        else:
-            return jsonify({"message": "unknown action"}), 400
+        try:
+            if action == "add":
+                token = (data.get("token") or "").strip()
+                if not token:
+                    return jsonify({"message": "token missing"}), 400
+                credentials.add_token(token, name=(data.get("label") or ""), repo_full=repo_full)
+            elif action == "remove":
+                credentials.remove_item(data.get("id"))
+            elif action == "clear":
+                credentials.clear_repo(repo_full)
+            else:
+                return jsonify({"message": "unknown action"}), 400
+        except remote.RemoteError as e:
+            return jsonify({"message": e.message}), e.code
+        except Exception as e:
+            return jsonify({"message": f"保存失败：{e}"}), 502
         tokens = paths.load_repo_tokens(repo_full)
         return jsonify({
             "message": "OK",
@@ -350,36 +443,22 @@ def register(app):
         })
 
     # ---------------------------------------------------------------
-    # 本地配置（GitHub Token / LLM）
+    # 本机配置：提交身份（令牌与 LLM 已改存服务端，见 /api/local/tokens、/api/local/llm）
     # ---------------------------------------------------------------
     @app.route("/api/local/config", methods=["POST"])
     def local_config_save():
         data = request.get_json(silent=True) or {}
-        allowed = {"llm_api_key", "llm_base_url", "llm_model", "git_name", "git_email"}
-        # 兼容旧字段：github_token 追加到令牌列表；clear 里的 github_token 视为清空列表
-        clear_keys = [k for k in (data.get("clear") or []) if k in allowed or k == "github_token"]
-        if "github_token" in clear_keys:
-            paths.save_global_tokens([])
+        allowed = {"git_name", "git_email"}
+        clear_keys = [k for k in (data.get("clear") or [])
+                      if k in ("llm_api_key", "llm_base_url", "llm_model")]
         if clear_keys:
-            paths.clear_local_conf([k for k in clear_keys if k in allowed])
-        new_token = (data.get("github_token") or "").strip()
-        if new_token:
-            paths.add_global_token(new_token)
+            paths.clear_local_conf(clear_keys)
         update = {k: str(v) for k, v in data.items() if k in allowed and v is not None}
         if update:
             paths.save_local_conf(update)  # 增量合并写入，避免覆盖其它键
-        local = paths.load_local_conf()
-        global_tokens = paths.load_global_tokens()
         return jsonify({
             "message": "OK",
-            "github_configured": bool(global_tokens),
-            "github_tokens": paths.token_hint_list(global_tokens),
-            "github_token_count": len(global_tokens),
-            "github_token_hint": paths.mask(global_tokens[0]) if global_tokens else "",
-            "llm_configured": bool(local.get("llm_api_key")),
-            "llm_api_key_hint": paths.mask(local.get("llm_api_key")),
-            "llm_base_url": local.get("llm_base_url") or "",
-            "llm_model": local.get("llm_model") or "",
+            "llm_configured": bool(paths.load_llm_configs()),
             "git_name": paths.git_identity()[0],
             "git_email": paths.git_identity()[1],
         })
@@ -535,6 +614,77 @@ def register(app):
     @app.route("/api/Agent/state", methods=["GET"])
     def agent_state():
         return jsonify({"message": "OK", "state": core.get_state()})
+
+    # ---------------------------------------------------------------
+    # 执行轨迹（AI 思考 / 工具调用 / 回答）：实时与历史
+    # ---------------------------------------------------------------
+    @app.route("/api/Agent/trace", methods=["POST"])
+    def agent_trace():
+        data = request.get_json(silent=True) or {}
+        repo_full = (data.get("repo_full") or "").strip()
+        uid = (data.get("uuid") or "").strip()
+        if not repo_full or not uid:
+            return jsonify({"message": "repo_full or uuid missing"}), 400
+        found = trace.load(repo_full, uid)
+        if not found:
+            return jsonify({"message": "trace not found"}), 404
+        return jsonify({"message": "OK", "trace": found})
+
+    @app.route("/api/Agent/trace/live", methods=["POST"])
+    def agent_trace_live():
+        """当前正在执行任务的轨迹（供实时轮询）。"""
+        state = core.get_state()
+        repo_full = (state.get("repo_full") or "").strip()
+        uid = (state.get("running_uuid") or "").strip()
+        if not repo_full or not uid:
+            return jsonify({"message": "OK", "running": False, "trace": None})
+        return jsonify({"message": "OK", "running": True, "trace": trace.load(repo_full, uid)})
+
+    # ---------------------------------------------------------------
+    # GitHub 代理（跨客户端互助）：状态 / 开关 / 自检
+    # ---------------------------------------------------------------
+    @app.route("/api/proxy/status", methods=["POST"])
+    def proxy_status():
+        data = request.get_json(silent=True) or {}
+        if any(k in data for k in ("enabled", "as_helper")):
+            proxy.configure(enabled=data.get("enabled"), as_helper=data.get("as_helper"))
+            proxy.ensure_started()
+        st = proxy.status()
+        nodes, stats, error = [], {}, ""
+        try:
+            body, _ = remote.call("/api/proxy/nodes", {}, timeout=20)
+            nodes = body.get("nodes") or []
+            stats = body.get("stats") or {}
+        except Exception as e:
+            error = str(e)
+        return jsonify({
+            "message": "OK",
+            "local": st,
+            "proxy_url": proxy.local_proxy_url(),
+            "active": proxy.active(),
+            "mode": "proxy" if proxy.in_proxy_mode() else "direct",
+            "nodes": nodes,
+            "stats": stats,
+            "error": error,
+        })
+
+    @app.route("/api/proxy/test", methods=["POST"])
+    def proxy_test():
+        """自检：经隧道访问一次 api.github.com，验证打洞 / 中继是否可用。"""
+        import time as _time
+
+        started = _time.time()
+        try:
+            sock, via = proxy.open_tunnel("api.github.com:443")
+            try:
+                sock.close()
+            except OSError:
+                pass
+            return jsonify({"message": "OK", "ok": True, "via": via,
+                            "seconds": round(_time.time() - started, 2)})
+        except Exception as e:
+            return jsonify({"message": "OK", "ok": False, "reason": str(e),
+                            "seconds": round(_time.time() - started, 2)})
 
     @app.route("/api/Agent/logs", methods=["GET"])
     def agent_logs():

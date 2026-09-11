@@ -1,10 +1,52 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import { useRouter } from 'vue-router'
-import { state, logout, isLoggedIn } from './store'
+import { computed, onMounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { state, loadStatus, isLoggedIn, logout } from './store'
+import { postJSON } from './api'
 
 const router = useRouter()
-const logged = computed(() => isLoggedIn())
+const route = useRoute()
+const logged = computed(() => isLoggedIn() && route.path !== '/login')
+
+const NAV = [
+  { to: '/overview', label: 'Agent 运行' },
+  { to: '/tasks', label: '任务记录' },
+  { to: '/config', label: '配置' },
+  { to: '/diagnostics', label: '诊断' },
+  { to: '/logs', label: '运行日志' },
+  { to: '/agreement', label: '用户协议' },
+]
+
+/** 未登录一律回登录页；已登录访问 /login 则进控制台 */
+async function guard() {
+  if (!state.loaded) await loadStatus()
+  if (!isLoggedIn()) {
+    if (route.path !== '/login') router.replace('/login')
+    return
+  }
+  if (route.path === '/login') router.replace('/overview')
+}
+
+onMounted(async () => {
+  await guard()
+  if (!isLoggedIn()) return
+  // 登录态若已被远端拒绝，清理凭证并回登录页，避免"看着登录了却处处 401"
+  try {
+    const d = await postJSON<{
+      logged_in: boolean
+      session: { checked: boolean; valid: boolean; reason: string }
+    }>('/api/local/diagnostics', {})
+    if (d.logged_in && d.session?.checked && !d.session.valid) {
+      await postJSON('/api/user/logout', {})
+      state.error = `登录已失效：${d.session.reason}，请重新登录`
+      router.replace('/login')
+    }
+  } catch {
+    /* 网络异常时不强制退出 */
+  }
+})
+
+watch(() => route.path, guard)
 
 async function doLogout() {
   try {
@@ -12,7 +54,7 @@ async function doLogout() {
   } catch {
     /* ignore */
   }
-  router.push('/login')
+  router.replace('/login')
 }
 </script>
 
@@ -20,13 +62,13 @@ async function doLogout() {
   <header class="topbar">
     <div class="brand">
       <span class="logo">CodeVoyage</span>
-      <span class="muted sub">本地控制台 · 5431</span>
     </div>
+    <nav v-if="logged">
+      <RouterLink v-for="item in NAV" :key="item.to" :to="item.to">{{ item.label }}</RouterLink>
+    </nav>
     <div class="spacer"></div>
     <nav>
-      <RouterLink to="/console">控制台</RouterLink>
-      <RouterLink v-if="!logged" to="/login">登录 / 注册</RouterLink>
-      <template v-else>
+      <template v-if="state.status?.email">
         <span class="email">{{ state.status?.email }}</span>
         <button class="ghost" @click="doLogout">退出登录</button>
       </template>
@@ -34,10 +76,6 @@ async function doLogout() {
   </header>
   <main class="page">
     <RouterView />
-    <p class="app-hint">
-      本页面只是控制台界面：关闭浏览器标签不会停止后台运行（GetIssue / Agent / 5431 服务仍在工作）。
-      退出请使用系统托盘的「退出」。
-    </p>
   </main>
 </template>
 
@@ -45,7 +83,7 @@ async function doLogout() {
 .topbar {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 20px;
   padding: 0 20px;
   height: 54px;
   background: var(--panel);
@@ -66,11 +104,19 @@ async function doLogout() {
 nav {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 6px;
 }
 
 nav a {
+  color: var(--text-dim);
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+nav a.router-link-active {
   color: var(--text);
+  background: var(--panel-2);
 }
 
 .email {
@@ -85,16 +131,7 @@ button.ghost {
 
 .page {
   padding: 22px;
-  max-width: 1180px;
+  max-width: 1320px;
   margin: 0 auto;
-}
-
-.app-hint {
-  margin-top: 24px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
-  color: var(--text-dim);
-  font-size: 12px;
-  line-height: 1.7;
 }
 </style>
