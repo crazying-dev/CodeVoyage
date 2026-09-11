@@ -22,6 +22,7 @@ load_dotenv()
 
 import database  # noqa: E402
 import mail  # noqa: E402
+import proxy  # noqa: E402
 import vault  # noqa: E402
 
 app = Flask(__name__, static_folder=None)
@@ -293,6 +294,144 @@ def credentials_reveal():
         return _fail(f"解密失败：{e}")
     return _ok({"message": "OK", "id": cred["id"], "kind": cred["kind"],
                 "value": value, "extra": cred["extra"]})
+
+
+# ==================================================================
+#  GitHub 代理（跨客户端互助）：协调 + 中继
+#  代连方只做 TLS 盲转发，看不到请求方的 Token 与代码，只知道目标是 github.com
+# ==================================================================
+_relay_ready = False
+
+
+def _ensure_relay() -> None:
+    """按需启动中继监听（在真正处理请求的进程里启动，避免 debug 重载器进程不一致）。"""
+    global _relay_ready
+    if _relay_ready:
+        return
+    port = int(os.getenv("PROXY_RELAY_PORT", "5433") or 0)
+    if port and proxy.start_relay(port):
+        _relay_ready = True
+
+
+def _peer_ip() -> str:
+    """取真实客户端 IP（服务端在 nginx 后，remote_addr 是 127.0.0.1）。"""
+    fwd = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+    return fwd or (request.headers.get("X-Real-IP") or "").strip() or (request.remote_addr or "")
+
+
+def _public_session(s: dict) -> dict:
+    return {
+        "sid": s["sid"],
+        "token": s["token"],
+        "helper_email": s.get("helper_email", ""),
+        "same_user": bool(s.get("same_user")),
+        "candidates": s.get("candidates") or [],
+        "requester_candidates": s.get("requester_candidates") or [],
+        "attempts": s.get("attempts"),
+        "relay_port": proxy.stats().get("relay_port", 0),
+        "relay_host": (os.getenv("PROXY_RELAY_HOST") or "").strip(),
+    }
+
+
+@app.route("/api/proxy/register", methods=["POST"])
+def proxy_register():
+    """登记为「可连 GitHub 的代连节点」。"""
+    user = _auth_or_abort()
+    _ensure_relay()
+    data = request.get_json(silent=True) or {}
+    try:
+        port = int(data.get("port") or 0)
+    except (TypeError, ValueError):
+        return _fail("port invalid")
+    if not 0 < port < 65536:
+        return _fail("port invalid")
+    node = proxy.register_node(user["id"], user.get("email", ""), _peer_ip(), port,
+                               data.get("lan_hosts") or [], bool(data.get("github_ok")),
+                               (data.get("note") or "").strip())
+    return _ok({"message": "OK", "node_id": node["node_id"], "public_host": node["public_host"],
+                "port": node["port"], "relay_port": proxy.stats().get("relay_port", 0)})
+
+
+@app.route("/api/proxy/heartbeat", methods=["POST"])
+def proxy_heartbeat():
+    """心跳 + 领取分配给本节点的会话（供代连方主动回拨）。"""
+    user = _auth_or_abort()
+    _ensure_relay()
+    data = request.get_json(silent=True) or {}
+    node_id = str(data.get("node_id") or "")
+    alive = proxy.touch_node(node_id, user["id"])
+    return _ok({"message": "OK", "ok": alive,
+                "pending": proxy.pending_sessions(node_id) if alive else []})
+
+
+@app.route("/api/proxy/unregister", methods=["POST"])
+def proxy_unregister():
+    user = _auth_or_abort()
+    data = request.get_json(silent=True) or {}
+    return _ok({"message": "OK", "ok": proxy.unregister_node(str(data.get("node_id") or ""), user["id"])})
+
+
+@app.route("/api/proxy/nodes", methods=["POST"])
+def proxy_nodes():
+    user = _auth_or_abort()
+    _ensure_relay()
+    return _ok({"message": "OK", "nodes": proxy.list_nodes(user["id"]), "stats": proxy.stats()})
+
+
+@app.route("/api/proxy/request", methods=["POST"])
+def proxy_request():
+    """请求方领取一次代理会话（打洞失败后由客户端走中继）。"""
+    user = _auth_or_abort()
+    _ensure_relay()
+    data = request.get_json(silent=True) or {}
+    session = proxy.create_session(
+        user["id"], _peer_ip(), data.get("candidates") or [],
+        data.get("attempts") or proxy.DEFAULT_PUNCH_ATTEMPTS,
+        data.get("exclude") or [],
+    )
+    if not session:
+        return _ok({"message": "OK", "ok": False, "reason": "当前没有可用的代连节点"})
+    return _ok({"message": "OK", "ok": True, "session": _public_session(session)})
+
+
+@app.route("/api/proxy/session", methods=["POST"])
+def proxy_session():
+    user = _auth_or_abort()
+    data = request.get_json(silent=True) or {}
+    s = proxy.get_session(str(data.get("sid") or ""))
+    if not s:
+        return _fail("session not found", 404)
+    return _ok({"message": "OK", "session": _public_session(s)})
+
+
+@app.route("/api/proxy/verify", methods=["POST"])
+def proxy_verify():
+    """代连方在收到连接时校验对方身份（sid + token）。"""
+    _auth_or_abort()
+    data = request.get_json(silent=True) or {}
+    # 会话密钥字段名为 session_token：避免与请求体里用于鉴权的 token 冲突
+    ok, reason = proxy.verify_session(str(data.get("sid") or ""),
+                                      str(data.get("session_token") or ""),
+                                      str(data.get("role") or ""))
+    return _ok({"message": "OK", "ok": ok, "reason": reason})
+
+
+@app.route("/api/proxy/report", methods=["POST"])
+def proxy_report():
+    """上报打洞 / 中继结果；中继连续失败会返回 should_switch=true。"""
+    _auth_or_abort()
+    data = request.get_json(silent=True) or {}
+    res = proxy.report(str(data.get("sid") or ""), data)
+    if not res:
+        return _fail("session not found", 404)
+    return _ok({"message": "OK", **res})
+
+
+@app.route("/api/proxy/stats", methods=["POST"])
+def proxy_stats():
+    _auth_or_abort()
+    _ensure_relay()
+    return _ok({"message": "OK", "stats": proxy.stats()})
 
 
 # 生成给用户放置到仓库 .github/workflows/ 的 workflow 模板
