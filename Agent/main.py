@@ -7,7 +7,9 @@
 4. 全过程写入执行轨迹（centre.trace），控制台可实时查看与事后回看；
 5. 解析最终答复中的 Conclusion，作为提交信息；
 6. git 提交并推送分支，调用 GitHub API 创建 Pull Request；
-7. 返回结果由上层回执给远端。
+7. 登记本次工作分支（centre.branch_gc）：PR 合并进默认分支后由后台巡检自动销毁，
+   保证项目仓库的分支管理规范可维护（Issue #13）；
+8. 返回结果由上层回执给远端。
 
 工作区安全：work 目录名由远端下发的任务 uuid 拼成，注入文件工具之前必须
 （1）用 `paths.safe_name` 清洗 uuid；（2）校验最终路径位于 `paths.REPO_DIR` 之内；
@@ -22,7 +24,7 @@ import os
 
 import config
 import Info
-from centre import core, credentials, paths, proxy, trace
+from centre import branch_gc, core, credentials, paths, proxy, trace
 
 _MAX_ITERATIONS = 80
 
@@ -190,6 +192,11 @@ def run_task(task: dict) -> dict:
         pr_url = RepoOps.state()["pr_url"]
         if not pr_url:
             raise AgentError("未获得 PR 链接，任务未真正完成")
+
+        # 登记本次工作分支：PR 合并进默认分支后由后台巡检自动销毁（Issue #13）。
+        # 只登记不删除，避免 PR 尚未合并时误删工作分支。
+        branch_gc.register(repo_full, RepoOps.state().get("branch", ""), pr_url)
+
         paths.append_log(f"[{repo_full}#{issue_number}] 已完成，PR：{pr_url}")
         trace.finish(repo_full, uid, "ok")
         return {"status": "ok", "pr_url": pr_url, "conclusion": conclusion}

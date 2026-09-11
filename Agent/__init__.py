@@ -16,7 +16,7 @@ import re
 import time
 
 import Agent.main as runner
-from centre import core, notify, paths, remote
+from centre import branch_gc, core, notify, paths, remote
 
 # 需要脱敏的凭据样式
 _SECRET_PATTERNS = (
@@ -74,6 +74,9 @@ def main():
         try:
             task = core.next_unprocessed()
             if not task:
+                # 空闲时巡检（内部已节流，默认 10 分钟一次）：
+                # PR 合并进主分支后自动销毁对应工作分支，保证仓库分支管理干净
+                branch_gc.sweep_due()
                 time.sleep(1)
                 continue
 
@@ -99,6 +102,8 @@ def main():
             core.finish(uid, "done", pr_url=result.get("pr_url", ""))
             paths.append_log(f"任务完成：{repo_full}#{issue_no} PR={result.get('pr_url', '')}")
             _report(uid, "OK", pr_url=result.get("pr_url", ""))
+            # 任务结束后立刻巡检一次：若用户已经合并 PR，工作分支随即被销毁
+            branch_gc.sweep_due(force=True)
         except Exception as e:
             if task:
                 uid = task["uuid"]
