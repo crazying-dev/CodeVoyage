@@ -2,6 +2,9 @@
 
 落盘位置：~/.CodeVoyage/Agent/repo/<repo_hash>/traces/<uuid>.json
 控制台按 uuid 读取，即可回看某个任务的完整过程；执行中可轮询实时查看。
+
+安全：uuid 来自远端，会直接拼进文件名，必须经 paths.safe_name 清洗，
+否则 `../` 之类的输入可以写到数据目录之外（路径逃逸）。
 """
 import os
 import threading
@@ -24,8 +27,12 @@ def _dir(repo_full: str, create: bool = True) -> str:
     return d
 
 
+def _safe_uid(uid) -> str:
+    return paths.safe_name(uid, "unknown")
+
+
 def path_of(repo_full: str, uid: str) -> str:
-    return os.path.join(_dir(repo_full), f"{uid}.json")
+    return os.path.join(_dir(repo_full), f"{_safe_uid(uid)}.json")
 
 
 def start(repo_full: str, task: dict) -> dict:

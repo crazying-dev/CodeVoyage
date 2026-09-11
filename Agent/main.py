@@ -11,6 +11,11 @@
    保证项目仓库的分支管理规范可维护（Issue #13）；
 8. 返回结果由上层回执给远端。
 
+工作区安全：work 目录名由远端下发的任务 uuid 拼成，注入文件工具之前必须
+（1）用 `paths.safe_name` 清洗 uuid；（2）校验最终路径位于 `paths.REPO_DIR` 之内；
+（3）`ReadFile.set_workspace(dest, root=paths.REPO_DIR)` 再做一次根目录约束。
+这样即使远端下发的 uuid 里带 `..` / 分隔符，也无法把 AI 的文件工具指到工作区之外。
+
 凭据来源：GitHub PAT / LLM Key 存于服务端（加密），本机只保留同步缓存（centre.credentials）；
 提交身份仍取本机配置。
 """
@@ -26,6 +31,15 @@ _MAX_ITERATIONS = 80
 
 class AgentError(Exception):
     pass
+
+
+def _validate_workspace(dest: str) -> str:
+    """校验工作区目录必须落在 CodeVoyage 数据目录的 Agent/repo 之下，返回 realpath。"""
+    base = os.path.normcase(os.path.realpath(os.path.abspath(paths.REPO_DIR)))
+    target = os.path.normcase(os.path.realpath(os.path.abspath(dest)))
+    if target != base and not target.startswith(base + os.sep):
+        raise AgentError(f"工作区路径越界，已拒绝：{dest}")
+    return target
 
 
 def _llm_candidates() -> list:
@@ -122,7 +136,8 @@ def run_task(task: dict) -> dict:
     if not llm_candidates:
         raise AgentError("未配置 LLM API Key，请在控制台「配置」页添加")
 
-    dest = os.path.join(paths.repo_dir(repo_full), "work", uid or "run")
+    # uuid 来自远端：先清洗成安全的单个路径片段，再拼工作区目录
+    dest = _validate_workspace(os.path.join(paths.work_dir(repo_full), paths.safe_name(uid, "run")))
 
     trace.start(repo_full, task)
     core.set_activity({"running_uuid": uid, "repo_full": repo_full,
@@ -134,7 +149,11 @@ def run_task(task: dict) -> dict:
     # 克隆 / 建分支 / 提交推送 / 建 PR 全部由 AI 调用工具完成；
     # 这里只注入上下文并先划定工作区边界（文件工具一律限制在此目录内）。
     RepoOps.set_context(repo_full, uid, issue_number, dest)
-    ReadFile.set_workspace(dest)
+    try:
+        # root 约束：只允许把文件工具的工作区设在 Agent/repo 目录之下
+        ReadFile.set_workspace(dest, root=paths.REPO_DIR)
+    except ValueError as e:
+        raise AgentError(f"工作区初始化失败：{e}") from e
 
     try:
 

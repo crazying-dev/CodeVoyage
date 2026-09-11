@@ -33,6 +33,21 @@ CodeVoyage是一个通过[`Action Workflow`](https://docs.github.com/zh/actions)
 
 ---
 
+## 安全说明
+1. **上报地址与签名密钥不再写死**：workflow 中的 `CODEVOYAGE_WEBHOOK_URL` / `CODEVOYAGE_WEBHOOK_SECRET`
+   从仓库 `Settings → Secrets and variables → Actions` 读取（Variables 优先，其次 Secrets）；
+   未配置时上报步骤直接跳过，Issue 数据不会发往任何外部服务，且只接受 `https://` 地址。
+2. **文件操作边界**：AI 的文件工具（读取 / 写入 / 列表）与 Git 工具统一做路径校验，
+   绝对路径、`..`、符号链接逃逸一律拒绝；工作区必须位于 CodeVoyage 数据目录之下。
+3. **本地敏感数据加密**：`local.json` / `repo_tokens.json` / `credentials_cache.json` 使用
+   带认证的标准加密（`cryptography` 的 Fernet；缺少依赖时回退 HMAC-SHA256 流加密 + 认证标签），
+   `secret.key` 与各敏感文件权限收紧为 0600；不希望凭据落盘可设置 `CODEVOYAGE_DISABLE_CRED_CACHE=1`。
+4. **GitHub 代理默认关闭**：借用他人代连（`enabled`）与「本机作为代连节点」（`as_helper`）默认都不开启；
+   开启代连节点必须显式授权（`confirm`），且只允许转发白名单内的公网目标，并限制并发、记录审计日志。
+5. **远端回执脱敏**：回执给服务端的错误信息会去掉本机路径、令牌样式与带凭据的 URL。
+
+---
+
 ## 大致工作流程
 > 一下内容中我的服务器称作服务器Server  
 

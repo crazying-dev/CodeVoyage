@@ -10,8 +10,20 @@
 数据流向：
     请求方 git/requests → 本地 CONNECT 代理 → 发信组件打洞/中继 → 接收组件 → github.com:443
 TLS 端到端加密，接收方只搬运密文，看不到 Token 与代码。
+
+安全策略（审计整改）：
+- **默认全部关闭**：`enabled`（借用他人代连）与 `as_helper`（本机作为代连节点，
+  会把端口暴露到局域网/公网）都需要用户在控制台显式开启；开启代连节点还必须带
+  `confirm=True`，属于「知情授权」，启动时写入审计日志。
+- **目标白名单**：只允许 ALLOWED_TARGETS（可用 CODEVOYAGE_PROXY_TARGETS 追加，
+  逗号分隔）中的 `host:port`，其余一律 403；且域名解析结果不得是私网 / 回环 /
+  链路本地 / 保留地址，避免被当成访问内网的跳板。
+- **本地代理只监听 127.0.0.1**，并校验来源必须是回环地址。
+- 代连节点限制并发会话数（max_sessions），每条会话都写审计日志（来源 IP + 目标）。
 """
+import ipaddress
 import json
+import os
 import socket
 import threading
 
@@ -31,11 +43,13 @@ PUNCH_TIMEOUT = 3.0
 HELPER_PORT_DEFAULT = 45871
 LOCAL_PROXY_PORT_DEFAULT = 45872
 HEARTBEAT_INTERVAL = 30
+MAX_HELPER_SESSIONS = 4   # 代连节点同时承载的会话上限
 
 _lock = threading.RLock()
 _state = {
-    "enabled": True,           # 使用代理（请求方）
-    "as_helper": True,         # 作为代连节点（接收方）
+    "enabled": False,          # 使用代理（请求方）：默认关闭，需显式开启
+    "as_helper": False,        # 作为代连节点（接收方）：默认关闭，需显式授权
+    "helper_consent": False,   # 是否已获得「作为代连节点」的明确授权
     "helper_port": HELPER_PORT_DEFAULT,
     "local_port": LOCAL_PROXY_PORT_DEFAULT,
     "node_id": "",
@@ -48,6 +62,8 @@ _state = {
     "direct_ok": 0,
     "relay_ok": 0,
     "relay_fails": 0,
+    "active_sessions": 0,
+    "max_sessions": MAX_HELPER_SESSIONS,
     "fail_reason": "",
     "last_event": "",
 }
@@ -65,16 +81,36 @@ def status() -> dict:
         return dict(_state)
 
 
-def configure(enabled=None, as_helper=None, helper_port=None, local_port=None) -> dict:
+def configure(enabled=None, as_helper=None, helper_port=None, local_port=None,
+              confirm: bool = False) -> dict:
+    """修改代理配置。
+
+    as_helper=True 必须同时传 confirm=True：把本机变成代连节点意味着对其它客户端
+    开放一个转发端口（可被用于借道出网），属于敏感开关，要求调用方显式确认。
+    """
+    note = ""
     with _lock:
         if enabled is not None:
             _state["enabled"] = bool(enabled)
+            note = f"代理（借用他人代连）{'已开启' if _state['enabled'] else '已关闭'}"
         if as_helper is not None:
-            _state["as_helper"] = bool(as_helper)
+            if bool(as_helper) and not confirm:
+                _state["fail_reason"] = "开启代连节点需要显式确认（confirm=true）"
+                note = "代连节点未开启：缺少显式确认"
+            elif bool(as_helper):
+                _state["as_helper"] = True
+                _state["helper_consent"] = True
+                note = "已开启代连节点（本机会向信令服务器登记并代其它客户端转发白名单 TLS 流量）"
+            else:
+                _state["as_helper"] = False
+                _state["helper_consent"] = False
+                note = "代连节点已关闭"
         if helper_port:
             _state["helper_port"] = int(helper_port)
         if local_port:
             _state["local_port"] = int(local_port)
+    if note:
+        _log(f"[审计] {note}")
     return status()
 
 
@@ -98,6 +134,12 @@ def active() -> bool:
         return bool(_state["enabled"] and _state["local_running"])
 
 
+def helper_authorized() -> bool:
+    """是否已获得代连节点的明确授权（默认未授权）。"""
+    with _lock:
+        return bool(_state["as_helper"] and _state["helper_consent"])
+
+
 def _log(msg: str) -> None:
     paths.append_log(f"[代理] {msg}")
     with _lock:
@@ -106,6 +148,60 @@ def _log(msg: str) -> None:
 
 # 供 ProxyReceiver / ProxySender 两个组件使用
 log = _log
+
+
+# ---------------------------------------------------------------- 目标白名单
+def allowed_targets() -> set:
+    """白名单目标集合；可用 CODEVOYAGE_PROXY_TARGETS 追加（逗号分隔的 host:port）。"""
+    out = set(ALLOWED_TARGETS)
+    for item in str(os.getenv("CODEVOYAGE_PROXY_TARGETS") or "").split(","):
+        target = item.strip().lower()
+        if target and ":" in target:
+            out.add(target)
+    return out
+
+
+def _is_public_host(host: str) -> bool:
+    """域名解析结果必须全部是公网地址（拒绝私网 / 回环 / 链路本地 / 保留地址）。"""
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return False
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return False
+        if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+                or ip.is_multicast or ip.is_unspecified):
+            return False
+    return True
+
+
+def is_allowed_target(target: str) -> bool:
+    """目标是否合法：必须在白名单内，且解析出的地址都是公网地址。"""
+    text = str(target or "").strip().lower()
+    if text not in allowed_targets():
+        return False
+    host, port = split_hostport(text)
+    if not host or not port:
+        return False
+    return _is_public_host(host)
+
+
+# ---------------------------------------------------------------- 代连会话配额
+def session_open() -> bool:
+    """申请一个代连会话名额；超出并发上限返回 False。"""
+    with _lock:
+        if int(_state["active_sessions"]) >= int(_state["max_sessions"]):
+            return False
+        _state["active_sessions"] = int(_state["active_sessions"]) + 1
+        return True
+
+
+def session_close() -> None:
+    with _lock:
+        _state["active_sessions"] = max(0, int(_state["active_sessions"]) - 1)
 
 
 # ---------------------------------------------------------------- 代理模式
@@ -223,6 +319,14 @@ def remote_hostname() -> str:
     return paths.remote_base().split("://", 1)[-1].split("/")[0].partition(":")[0]
 
 
+def _is_loopback_addr(addr) -> bool:
+    try:
+        ip = ipaddress.ip_address(str(addr[0]))
+    except (ValueError, IndexError, TypeError):
+        return False
+    return ip.is_loopback
+
+
 # ---------------------------------------------------------------- 发信组件入口（注册制，避免循环依赖）
 def set_opener(fn) -> None:
     global _opener
@@ -246,7 +350,7 @@ def local_start(port: int | None = None) -> bool:
     try:
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        srv.bind(("127.0.0.1", port))
+        srv.bind(("127.0.0.1", port))    # 只监听本机回环，不对局域网暴露
         srv.listen(32)
     except OSError as e:
         _log(f"本地代理启动失败（{port}）：{e}")
@@ -274,9 +378,15 @@ def _local_accept(srv: socket.socket) -> None:
             if not _state["local_running"]:
                 return
         try:
-            conn, _addr = srv.accept()
+            conn, addr = srv.accept()
         except OSError:
             return
+        if not _is_loopback_addr(addr):     # 双保险：非本机来源直接断开
+            try:
+                conn.close()
+            except OSError:
+                pass
+            continue
         threading.Thread(target=_local_session, args=(conn,), daemon=True).start()
 
 
@@ -296,8 +406,8 @@ def _local_session(conn: socket.socket) -> None:
             conn.sendall(b"HTTP/1.1 405 Method Not Allowed\r\n\r\n")
             conn.close()
             return
-        target = parts[1].strip()
-        if target not in ALLOWED_TARGETS:
+        target = parts[1].strip().lower()
+        if not is_allowed_target(target):
             set_state(fail_reason=f"目标不在白名单内：{target}")
             conn.sendall(b"HTTP/1.1 403 Forbidden\r\n\r\n")
             conn.close()
@@ -328,18 +438,23 @@ def _local_session(conn: socket.socket) -> None:
 
 # ---------------------------------------------------------------- 编排
 def ensure_started() -> dict:
-    """按需启动接收组件、发信组件与本地代理（幂等）。"""
+    """按需启动接收组件、发信组件与本地代理（幂等）。
+
+    代连节点（接收组件）只在「用户显式授权」时才启动：默认不对外暴露端口、
+    不向信令服务器登记。
+    """
     import ProxyReceiver
     import ProxySender
 
     ProxySender.ensure_started()
     with _lock:
-        want_helper = _state["as_helper"]
+        want_helper = helper_authorized()
         want_local = _state["enabled"]
     if want_helper:
         ProxyReceiver.ensure_started()
     else:
         ProxyReceiver.stop()
+        log("代连节点未授权（默认关闭），本机不会向信令服务器登记")
     if want_local:
         local_start()
     else:

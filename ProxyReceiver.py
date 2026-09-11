@@ -6,6 +6,11 @@
 3. 校验对方会话凭据后，只连白名单目标（github.com:443 等）并**盲转发字节**——
    只搬运 TLS 密文，看不到对方的 Token 与代码。
 
+安全（审计整改）：
+- 未获得用户显式授权（centre.proxy.helper_authorized）时**不监听、不登记**；
+- 目标必须同时通过白名单与「解析结果为公网地址」检查，避免被当作访问内网的跳板；
+- 并发会话有上限（proxy.MAX_HELPER_SESSIONS），每条会话都写审计日志。
+
 由 main.py 启动；也可单独运行：python ProxyReceiver.py
 """
 import socket
@@ -28,8 +33,11 @@ _lock = threading.RLock()
 
 # ---------------------------------------------------------------- 启停
 def ensure_started() -> bool:
-    """启动监听并登记为代连节点（幂等）。"""
+    """启动监听并登记为代连节点（幂等）；未获授权则直接拒绝。"""
     global _srv, _running
+    if not proxy.helper_authorized():
+        proxy.log("代连节点未授权，忽略启动请求（本机不会监听/登记）")
+        return False
     with _lock:
         if _running:
             return True
@@ -45,10 +53,10 @@ def ensure_started() -> bool:
     with _lock:
         _srv, _running = srv, True
     proxy.set_state(helper_running=True, helper_port=port)
+    proxy.log(f"[审计] 代连节点已启动，监听 {port}（仅转发白名单目标的 TLS 密文）")
     threading.Thread(target=_accept_loop, args=(srv,), daemon=True, name="ProxyReceiver").start()
     threading.Thread(target=_register_loop, daemon=True, name="ProxyRegister").start()
     threading.Thread(target=_heartbeat_loop, daemon=True, name="ProxyHeartbeat").start()
-    proxy.log(f"接收组件已就绪，监听 {port}")
     return True
 
 
@@ -75,6 +83,10 @@ def _register_loop() -> None:
     while True:
         if not proxy.status().get("helper_running"):
             return
+        if not proxy.helper_authorized():   # 授权被撤销则立刻停止登记
+            proxy.log("[审计] 代连授权已撤销，停止登记并退出")
+            stop()
+            return
         if not proxy.status().get("node_id"):
             try:
                 github_ok = bool(net.latency("https://api.github.com/", timeout=6).get("ok"))
@@ -87,7 +99,7 @@ def _register_loop() -> None:
                     "github_ok": github_ok,
                 }, timeout=20)
                 proxy.set_state(node_id=body.get("node_id") or "")
-                proxy.log(f"已向信令服务器登记（GitHub 可达={github_ok}）")
+                proxy.log(f"[审计] 已向信令服务器登记为代连节点（GitHub 可达={github_ok}）")
             except Exception as e:
                 proxy.log(f"登记失败：{e}")
         time.sleep(RETRY_INTERVAL)
@@ -124,18 +136,32 @@ def _accept_loop(srv: socket.socket) -> None:
         threading.Thread(target=_session, args=(conn, addr), daemon=True).start()
 
 
+def _reject(conn: socket.socket, reason: str) -> None:
+    try:
+        proxy.send_line(conn, {"ok": False, "reason": reason})
+    except OSError:
+        pass
+    try:
+        conn.close()
+    except OSError:
+        pass
+
+
 def _session(conn: socket.socket, addr) -> None:
-    """校验凭据 → 白名单校验 → 回执 → 连目标 → 盲转发。
+    """校验授权/凭据 → 白名单校验 → 回执 → 连目标 → 盲转发。
 
     先回执握手再连目标：连接 GitHub 可能要几秒，不能让对端把这段等待误判为失败。
     """
+    if not proxy.helper_authorized():
+        _reject(conn, "本机未授权作为代连节点")
+        return
     try:
         hello = proxy.read_line(conn)
         sid = str(hello.get("sid") or "")
         token = str(hello.get("token") or "")
-        target = str(hello.get("target") or "")
-        if target not in proxy.ALLOWED_TARGETS:
-            raise ReceiverError("目标不在白名单内")
+        target = str(hello.get("target") or "").strip().lower()
+        if not proxy.is_allowed_target(target):
+            raise ReceiverError("目标不在白名单内（或解析到非公网地址）")
         # 会话密钥字段名为 session_token：避免与登录令牌 token 冲突
         body, _ = remote.call("/api/proxy/verify",
                               {"sid": sid, "session_token": token, "role": "requester"},
@@ -143,41 +169,48 @@ def _session(conn: socket.socket, addr) -> None:
         if not body.get("ok"):
             raise ReceiverError(body.get("reason") or "凭据校验失败")
     except Exception as e:
-        try:
-            proxy.send_line(conn, {"ok": False, "reason": f"{e}"})
-        except OSError:
-            pass
-        try:
-            conn.close()
-        except OSError:
-            pass
+        proxy.log(f"[审计] 拒绝来自 {addr[0] if addr else '?'} 的代连请求：{e}")
+        _reject(conn, f"{e}")
+        return
+
+    if not proxy.session_open():
+        proxy.log(f"[审计] 代连并发已达上限（{proxy.status().get('max_sessions')}），拒绝 {addr[0]}")
+        _reject(conn, "代连节点繁忙")
         return
 
     try:
-        proxy.send_line(conn, {"ok": True, "via": "helper", "target": target})
-    except OSError:
-        conn.close()
-        return
-
-    host, port = proxy.split_hostport(target)
-    try:
-        up = socket.create_connection((host, port), timeout=20)
-    except OSError as e:
-        proxy.log(f"代连连接 {target} 失败：{e}")
         try:
-            conn.close()
+            proxy.send_line(conn, {"ok": True, "via": "helper", "target": target})
         except OSError:
-            pass
-        return
+            conn.close()
+            return
 
-    proxy.bump("assist_count")
-    proxy.log(f"正在为 {addr[0]} 代连 {target}")
-    proxy.pipe(conn, up)
+        host, port = proxy.split_hostport(target)
+        try:
+            up = socket.create_connection((host, port), timeout=20)
+        except OSError as e:
+            proxy.log(f"代连连接 {target} 失败：{e}")
+            try:
+                conn.close()
+            except OSError:
+                pass
+            return
+
+        proxy.bump("assist_count")
+        proxy.log(f"[审计] 为 {addr[0]} 代连 {target}（仅转发 TLS 密文）")
+        proxy.pipe(conn, up)
+    finally:
+        proxy.session_close()
 
 
 # ---------------------------------------------------------------- 单独运行
 def main() -> None:
     paths.ensure_dirs()
+    if not proxy.helper_authorized():
+        raise SystemExit(
+            "代连节点未授权：请先在控制台「代理」中显式开启（confirm），"
+            "或在代码中调用 centre.proxy.configure(as_helper=True, confirm=True)。"
+        )
     if not ensure_started():
         raise SystemExit("接收组件启动失败（端口被占用？）")
     print(f"接收组件运行中，监听 {proxy.status().get('helper_port')}；Ctrl+C 退出。")

@@ -223,7 +223,9 @@ def list_workflows(token: str, repo_full: str) -> dict:
         files.append({
             "name": it.name,
             "path": it.path,
-            "is_codevoyage": ("CodeVoyage Issue Report" in content) or ("BACKEND_WEBHOOK_URL" in content),
+            "is_codevoyage": any(marker in content for marker in (
+                "CodeVoyage Issue Report", "BACKEND_WEBHOOK_URL", "CODEVOYAGE_WEBHOOK_URL",
+            )),
             "has_author_check": "comment_author" in content,
         })
     return {"exists": bool(files), "files": files, "reason": "", "retryable": False}
@@ -302,7 +304,11 @@ def commit_workflow_pr(token: str, repo_full: str, path: str, content: str,
             f"- 分支：`{branch}` → `{base}`\n"
             f"- 提交邮箱：`{email}`\n"
             "- **合并本 PR 后** workflow 才会生效\n"
-            "- 服务端地址与签名密钥已直接写入 workflow 文件，无需再配置仓库 Secrets\n"
+            "- 上报地址与签名密钥不再写入文件：请在本仓库 "
+            "`Settings → Secrets and variables → Actions` 配置\n"
+            "  - Variables：`CODEVOYAGE_WEBHOOK_URL`（必须是 https 地址）\n"
+            "  - Secrets：`CODEVOYAGE_WEBHOOK_SECRET`（与服务端 WEBHOOK_SECRET 一致）\n"
+            "- 未配置时 workflow 会跳过上报：Issue 数据不会发往任何外部服务\n"
         )
         pr = repo.create_pull(title=title, body=body, head=branch, base=base)
         _log(f"4/4 已创建 PR：{pr.html_url}")

@@ -5,6 +5,9 @@
 
 令牌解析仍走 paths.resolve_tokens（仓库专属细粒度 → 全局传统，顺序回退），
 网络受限时经 proxy.github_call 自动切到 GitHub 代理。
+
+安全：分支名由 issue 编号与任务 uuid 拼成，二者均来自远端，必须先用
+paths.safe_name 清洗，避免出现非法 / 逃逸字符。
 """
 from centre import paths, proxy
 from tools import GitRepo, ReadFile
@@ -41,6 +44,13 @@ def _log(msg: str) -> None:
     paths.append_log(f"[{_ctx['repo_full']}#{_ctx['issue_number']}] {msg}")
 
 
+def _branch_name() -> str:
+    """分支名：codevoyage/issue-<编号>-<uuid 前 6 位>（组件均已清洗）。"""
+    issue_no = paths.safe_name(_ctx["issue_number"], "0")[:20]
+    slug = paths.safe_name(_ctx["uid"], "")[:6] or "task"
+    return f"codevoyage/issue-{issue_no}-{slug}"
+
+
 # ---------------------------------------------------------------- 工具实现
 def clone_repo() -> str:
     """克隆目标仓库到工作区（多令牌顺序回退）。"""
@@ -61,7 +71,7 @@ def clone_repo() -> str:
         try:
             proxy.github_call(_clone_once)
             _ctx.update({"cloned": True, "token": token, "token_source": source})
-            ReadFile.set_workspace(_ctx["dest"])
+            ReadFile.set_workspace(_ctx["dest"], root=paths.REPO_DIR)
             kind = "仓库专属/细粒度" if source == "repo" else "全局/传统"
             _log(f"克隆成功（第 {idx} 个令牌，来源 {kind}）")
             return f"克隆成功，工作区已就绪：{_ctx['dest']}"
@@ -91,7 +101,7 @@ def create_branch() -> str:
         default = ""
     if not default:
         default = GitRepo.current_branch(dest)
-    branch = f"codevoyage/issue-{_ctx['issue_number']}-{str(_ctx['uid'])[:6]}"
+    branch = _branch_name()
     try:
         GitRepo.create_branch(dest, branch)
     except Exception as e:

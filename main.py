@@ -71,13 +71,17 @@ if __name__ == "__main__":
     # GitHub 代理：两个组件都由 main 启动
     #   发信组件（ProxySender）：向信令服务器要对方 IP、打洞、发信建隧道
     #   接收组件（ProxyReceiver）：监听端口、登记自己的地址、替对方盲转发
+    # 安全默认：借用他人代连（enabled）与「本机作为代连节点」（as_helper）**默认关闭**，
+    # 需在控制台显式开启；开启代连节点还必须带明确授权（confirm），避免无感地对外暴露端口。
     from centre import proxy as cv_proxy
     import ProxyReceiver
     import ProxySender
 
     threading.Thread(target=ProxySender.ensure_started, daemon=True).start()
-    if cv_proxy.status().get("as_helper"):
+    if cv_proxy.helper_authorized():
         threading.Thread(target=ProxyReceiver.ensure_started, daemon=True).start()
+    else:
+        cv_proxy.log("代连节点默认关闭：本机不监听转发端口，也不向信令服务器登记")
     if cv_proxy.status().get("enabled"):
         threading.Thread(target=cv_proxy.local_start, daemon=True).start()
     if not os.getenv("CODEVOYAGE_NO_BROWSER"):

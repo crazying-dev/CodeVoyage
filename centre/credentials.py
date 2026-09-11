@@ -3,7 +3,14 @@
 远端接口（CodeVoyage-server/app.py）：
     /api/user/credentials/list | add | update | remove | move | reveal
 - list 只返回脱敏值；明文通过 reveal 逐条取回；
-- 取回后写入 centre.paths 的本地缓存（混淆落盘），远端不可用时 Agent 仍可继续工作。
+- 取回后写入 centre.paths 的本地缓存（**加密**落盘，见 paths._encrypt），远端不可用时
+  Agent 仍可继续工作。
+
+安全说明（审计整改）：
+- 缓存文件用与本地配置相同的强加密写入，落盘后权限收紧为 0600（仅属主可读）；
+- 不希望任何凭据落到磁盘时，设置环境变量 CODEVOYAGE_DISABLE_CRED_CACHE=1，
+  此时只在内存中缓存（远端不可用则无法离线执行任务）；
+- 日志中只记录条数/结果，绝不记录明文令牌。
 
 首次同步时会把迁移前保存在本机的令牌 / LLM 配置上传到服务端（仅当服务端对应类别为空）。
 """
@@ -58,7 +65,10 @@ def _fetch_from_remote() -> dict:
 
 
 def sync(force: bool = False) -> dict:
-    """同步远端凭据到本地缓存；远端异常时退回上次缓存。"""
+    """同步远端凭据到本地缓存；远端异常时退回上次缓存。
+
+    缓存落盘为加密内容且权限 0600；设置 CODEVOYAGE_DISABLE_CRED_CACHE=1 时只留内存缓存。
+    """
     global _cache
     with _lock:
         if _cache is not None and not force:
@@ -72,6 +82,11 @@ def sync(force: bool = False) -> dict:
             return cached
         paths.save_cred_cache(data)
         _cache = data
+        count = len(data.get("github_tokens") or []) + len(data.get("llm") or [])
+        if paths.cred_cache_disabled():
+            paths.append_log(f"凭据已同步到内存（{count} 条；已按配置禁止写入磁盘缓存）")
+        else:
+            paths.append_log(f"凭据已同步并加密缓存到本机（{count} 条）")
         return data
 
 

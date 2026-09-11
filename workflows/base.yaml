@@ -119,12 +119,17 @@ jobs:
             }));
             core.setOutput("comments_json", JSON.stringify(simplified));
 
+      # 上报目标与签名密钥一律从仓库配置读取（Variables 优先，其次 Secrets），
+      # 不再把服务端地址 / 密钥写死在 workflow 里：
+      #   Settings → Secrets and variables → Actions
+      #     Variables: CODEVOYAGE_WEBHOOK_URL（例：https://your-server.example.com）
+      #     Secrets  : CODEVOYAGE_WEBHOOK_SECRET（与服务端 WEBHOOK_SECRET 一致）
+      # 未配置时本步骤直接跳过：Issue 数据不会发往任何外部服务。
       - name: push info with POST
         if: steps.match_keyword.outputs.hit == 'true'
         env:
-          # 服务端地址与签名密钥直接写死在文件里，无需再配置仓库 Secrets
-          WEBHOOK_URL: "https://codevoyage.yjlt.top/api/Github/Issue"
-          WEBHOOK_SECRET: ""
+          WEBHOOK_URL: ${{ vars.CODEVOYAGE_WEBHOOK_URL || secrets.CODEVOYAGE_WEBHOOK_URL }}
+          WEBHOOK_SECRET: ${{ secrets.CODEVOYAGE_WEBHOOK_SECRET }}
           REPO_OWNER: ${{ steps.extract.outputs.repo_owner }}
           REPO_NAME: ${{ steps.extract.outputs.repo_name }}
           ISSUE_NUMBER: ${{ steps.extract.outputs.issue_number }}
@@ -137,14 +142,32 @@ jobs:
           ALL_COMMENTS: ${{ steps.fetch_all_comments.outputs.comments_json }}
         run: |
           if [ -z "$WEBHOOK_URL" ]; then
-            echo "::error::服务端地址为空，请重新在控制台生成并提交 workflow"
-            exit 1
+            echo "::warning::未配置 CODEVOYAGE_WEBHOOK_URL（仓库 Variables 或 Secrets），已跳过上报，Issue 数据不会发送到任何外部服务。"
+            echo "::notice::如需启用 CodeVoyage，请在本仓库 Settings → Secrets and variables → Actions 中配置 CODEVOYAGE_WEBHOOK_URL 与 CODEVOYAGE_WEBHOOK_SECRET。"
+            exit 0
           fi
+
+          # 只允许 https：避免 Issue 内容以明文方式发往外部
+          case "$WEBHOOK_URL" in
+            https://*) ;;
+            *)
+              echo "::error::CODEVOYAGE_WEBHOOK_URL 必须是 https:// 地址（当前：$WEBHOOK_URL）"
+              exit 1
+              ;;
+          esac
+
           URL="$WEBHOOK_URL"
           case "$URL" in
             */api/Github/Issue) ;;
             *) URL="${URL%/}/api/Github/Issue" ;;
           esac
+
+          AUTH_HEADER=()
+          if [ -z "$WEBHOOK_SECRET" ]; then
+            echo "::warning::未配置 CODEVOYAGE_WEBHOOK_SECRET，本次上报不带签名（服务端若开启校验将拒绝）。"
+          else
+            AUTH_HEADER=(-H "Authorization: Bearer $WEBHOOK_SECRET")
+          fi
 
           PAYLOAD=$(jq -n \
             --arg repo_owner "$REPO_OWNER" \
@@ -162,11 +185,11 @@ jobs:
           echo "POST $URL"
           CODE=$(curl -sS -L --post301 --post302 --post303 -o resp.txt -w "%{http_code}" -X POST "$URL" \
             -H "Content-Type: application/json" \
-            -H "Authorization: Bearer $WEBHOOK_SECRET" \
+            "${AUTH_HEADER[@]}" \
             -d "$PAYLOAD")
           echo "HTTP $CODE"
           cat resp.txt
           if [ "$CODE" -lt 200 ] || [ "$CODE" -ge 300 ]; then
-            echo "::error::服务端返回 $CODE（地址 $URL），请回到控制台重新生成并提交 workflow"
+            echo "::error::服务端返回 $CODE（地址 $URL），请检查 CODEVOYAGE_WEBHOOK_URL / CODEVOYAGE_WEBHOOK_SECRET 配置"
             exit 1
           fi

@@ -2,19 +2,30 @@
 
 本地状态默认保存在 ~/.CodeVoyage/（可用环境变量 CODEVOYAGE_HOME 覆盖）：
     user/conf.json            远端登录凭证 {ID, token, email}
-    local.json                本地敏感配置（传统令牌 / LLM Key / 提交身份，混淆后落盘）
-    repo_tokens.json          各仓库专属的细粒度令牌（混淆后落盘）
-    secret.key                混淆用随机密钥（首次启动生成，务必与配置一起保留）
+    local.json                本地敏感配置（传统令牌 / LLM Key / 提交身份，加密后落盘）
+    repo_tokens.json          各仓库专属的细粒度令牌（加密后落盘）
+    secret.key                加密用随机密钥（首次启动生成，权限 0600，务必与配置一起保留）
+    credentials_cache.json    服务端凭据缓存（加密后落盘，可用 CODEVOYAGE_DISABLE_CRED_CACHE=1 关闭落盘）
     Agent/repo/<repo_hash>/   每个仓库的处理数据目录
     Agent/state.json          全局运行状态（供 Agent 可视化）
     Agent/agent.log           运行日志
+
+安全说明：
+- 敏感配置一律经 `_encrypt` 加密后落盘：优先使用 `cryptography` 的 Fernet（AES-128-CBC + HMAC，
+  标准实现）；未安装该依赖时回退到标准库实现的 HMAC-SHA256 计数器模式流加密并附加 HMAC-SHA256
+  完整性标签（加密后认证，篡改会被拒绝），密钥由 secret.key 提供。
+- 历史上用简单 XOR 混淆写入的数据仍可读取（见 `_decrypt_legacy`），但新写入一律使用强加密。
+- secret.key 与各敏感 JSON 落盘后尽力收紧权限（0600），避免同机其它用户直接读取。
 
 若 ~/.CodeVoyage 不可写（例如受限环境），自动回退到项目内的 .codevoyage-local，
 实际路径可通过 /api/local/diagnostics 或控制台「本地配置」页查看。
 """
 import base64
+import hashlib
+import hmac
 import json
 import os
+import re
 import secrets
 from datetime import datetime
 
@@ -113,6 +124,7 @@ def ensure_dirs() -> None:
             os.makedirs(p, exist_ok=True)
         except OSError as e:
             raise StorageError(p, e) from e
+    _restrict(BASE_DIR, 0o700)
 
 
 def _load_json(path: str, default=None):
@@ -131,10 +143,46 @@ def _save_json(path: str, data) -> None:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         os.replace(tmp, path)
+        _restrict(path)  # 本地配置/状态含敏感信息，尽力限制为仅属主可读
     except StorageError:
         raise
     except OSError as e:
         raise StorageError(path, e) from e
+
+
+# ------------------------------ 路径与命名安全 ------------------------------
+_UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def safe_name(name, fallback: str = "") -> str:
+    """把外部输入（任务 uuid、仓库名等）转换成安全的**单个**路径片段。
+
+    远端下发的 uuid 会被拼进工作目录名与轨迹文件名，未清洗时可用
+    `..` / 路径分隔符实现路径逃逸。这里统一替换非法字符并去掉首尾的 `.` / `-`。
+    """
+    text = _UNSAFE_NAME.sub("-", str(name or "").strip()).strip(".-")
+    if not text or text in (".", ".."):
+        return fallback
+    return text[:120]
+
+
+def inside_path(path: str, root: str) -> bool:
+    """判断 path 是否位于 root 目录内部（Windows 下大小写不敏感）。"""
+    if not path or not root:
+        return False
+    p = os.path.normcase(os.path.realpath(os.path.abspath(path)))
+    r = os.path.normcase(os.path.realpath(os.path.abspath(root)))
+    if p == r:
+        return True
+    return p.startswith(r if r.endswith(os.sep) else r + os.sep)
+
+
+def _restrict(path: str, mode: int = 0o600) -> None:
+    """尽力收紧文件/目录权限（Windows 上仅能去掉继承的只读位，其余由 ACL 决定）。"""
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        pass
 
 
 def storage_info() -> dict:
@@ -143,7 +191,8 @@ def storage_info() -> dict:
         "user/conf.json（登录凭证）": USER_CONF_PATH,
         "local.json（令牌/LLM/提交身份）": LOCAL_CONF_PATH,
         "repo_tokens.json（仓库专属令牌）": REPO_TOKENS_PATH,
-        "secret.key（混淆密钥）": SECRET_KEY_PATH,
+        "secret.key（加密密钥）": SECRET_KEY_PATH,
+        "credentials_cache.json（服务端凭据缓存）": CRED_CACHE_PATH,
         "Agent/agent.log（运行日志）": LOG_PATH,
     }
     files = []
@@ -192,28 +241,93 @@ def clear_user_conf() -> None:
         pass
 
 
-# ------------------------------ 本地敏感配置（混淆落盘） ------------------------------
+# ------------------------------ 本地敏感配置（加密落盘） ------------------------------
+_FERNET_PREFIX = "cvf:"     # cryptography.Fernet（AES-128-CBC + HMAC-SHA256）
+_STREAM_PREFIX = "cvs:"     # 标准库实现：HMAC-SHA256 计数器模式 + HMAC-SHA256 认证标签
+_TAG_LEN = 32
+_NONCE_LEN = 16
+
+
 def _key() -> bytes:
     ensure_dirs()
-    if not os.path.exists(SECRET_KEY_PATH):
+    key = b""
+    try:
+        with open(SECRET_KEY_PATH, "rb") as f:
+            key = f.read()
+    except OSError:
+        key = b""
+    if len(key) < 32:   # 不存在 / 被截断：重新生成并收紧权限
         key = secrets.token_bytes(32)
         with open(SECRET_KEY_PATH, "wb") as f:
             f.write(key)
-    with open(SECRET_KEY_PATH, "rb") as f:
-        return f.read()
+        _restrict(SECRET_KEY_PATH)
+    return key
+
+
+def _fernet():
+    """优先使用 cryptography 的 Fernet；未安装则返回 None（走标准库回退实现）。"""
+    try:
+        from cryptography.fernet import Fernet
+    except Exception:
+        return None
+    return Fernet(base64.urlsafe_b64encode(hashlib.sha256(_key()).digest()))
+
+
+def _keystream(key: bytes, nonce: bytes, length: int) -> bytes:
+    """HMAC-SHA256 计数器模式密钥流（标准库可用的标准构造，不再是循环 XOR）。"""
+    out = bytearray()
+    counter = 0
+    while len(out) < length:
+        out += hmac.new(key, nonce + counter.to_bytes(8, "big"), hashlib.sha256).digest()
+        counter += 1
+    return bytes(out[:length])
 
 
 def _encrypt(plain: str) -> str:
+    """加密字符串（返回值带版本前缀，便于将来平滑升级算法）。"""
+    data = (plain or "").encode("utf-8")
+    f = _fernet()
+    if f is not None:
+        return _FERNET_PREFIX + f.encrypt(data).decode("ascii")
     key = _key()
-    data = plain.encode("utf-8")
-    xored = bytes(b ^ key[i % len(key)] for i, b in enumerate(data))
-    return base64.b64encode(xored).decode("ascii")
+    nonce = secrets.token_bytes(_NONCE_LEN)
+    stream = _keystream(key, nonce, len(data))
+    cipher = bytes(a ^ b for a, b in zip(data, stream))
+    tag = hmac.new(key, nonce + cipher, hashlib.sha256).digest()
+    return _STREAM_PREFIX + base64.b64encode(nonce + tag + cipher).decode("ascii")
 
 
 def _decrypt(enc: str) -> str:
+    """解密（新格式失败时回退读取历史 XOR 数据）；任何异常都返回空串。"""
+    text = str(enc or "")
+    if not text:
+        return ""
+    try:
+        if text.startswith(_FERNET_PREFIX):
+            f = _fernet()
+            if f is None:
+                return ""
+            return f.decrypt(text[len(_FERNET_PREFIX):].encode("ascii")).decode("utf-8")
+        if text.startswith(_STREAM_PREFIX):
+            raw = base64.b64decode(text[len(_STREAM_PREFIX):].encode("ascii"))
+            nonce, tag, cipher = raw[:_NONCE_LEN], raw[_NONCE_LEN:_NONCE_LEN + _TAG_LEN], \
+                raw[_NONCE_LEN + _TAG_LEN:]
+            key = _key()
+            expect = hmac.new(key, nonce + cipher, hashlib.sha256).digest()
+            if not hmac.compare_digest(tag, expect):   # 认证失败：拒绝，不返回脏数据
+                return ""
+            stream = _keystream(key, nonce, len(cipher))
+            return bytes(a ^ b for a, b in zip(cipher, stream)).decode("utf-8")
+    except Exception:
+        return ""
+    return _decrypt_legacy(text)
+
+
+def _decrypt_legacy(enc: str) -> str:
+    """读取历史数据：旧版本用简单 XOR 混淆写入，仅保留兼容读取。"""
     try:
         key = _key()
-        xored = base64.b64decode(enc.encode("ascii"))
+        xored = base64.b64decode(str(enc).encode("ascii"))
         data = bytes(b ^ key[i % len(key)] for i, b in enumerate(xored))
         return data.decode("utf-8")
     except Exception:
@@ -230,7 +344,7 @@ def load_local_conf() -> dict:
 
 
 def save_local_conf(values: dict) -> None:
-    """合并写入本地配置（不删除未提及的键），值统一混淆落盘。"""
+    """合并写入本地配置（不删除未提及的键），值统一加密落盘。"""
     raw = _load_json(LOCAL_CONF_PATH)
     for key, value in (values or {}).items():
         if value is None:
@@ -262,10 +376,17 @@ def mask(value: str, head: int = 4, tail: int = 4) -> str:
 
 
 # ------------------------------ 服务端凭据缓存 ------------------------------
-# 凭据（GitHub Token / LLM 配置）以服务端为准（加密存储），本机只保留一份混淆缓存，
+# 凭据（GitHub Token / LLM 配置）以服务端为准（加密存储），本机只保留一份**加密**缓存，
 # 用于远端不可用时继续工作。结构与远端 list 接口对齐：
 #   {"github_tokens": [...], "repo_tokens": {"owner/name": [...]}, "llm": [{...}]}
+# 若不希望任何凭据落到磁盘，可设置 CODEVOYAGE_DISABLE_CRED_CACHE=1（此时仅内存缓存）。
+def cred_cache_disabled() -> bool:
+    return str(os.getenv("CODEVOYAGE_DISABLE_CRED_CACHE") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def save_cred_cache(data: dict) -> None:
+    if cred_cache_disabled():
+        return
     _save_json(CRED_CACHE_PATH, {"blob": _encrypt(json.dumps(data or {}, ensure_ascii=False))})
 
 
@@ -299,7 +420,7 @@ def _normalize_token_list(value) -> list:
 
 
 def _decode_token(enc) -> str:
-    """解码已混淆的令牌；若本身就是明文令牌（历史数据）则原样返回。"""
+    """解码已加密的令牌；若本身就是明文令牌（历史数据）则原样返回。"""
     value = str(enc or "").strip()
     if not value:
         return ""
@@ -553,6 +674,7 @@ def append_log(message: str) -> None:
         # errors="replace"：日志内容含非法字符时也不能让调用方（进而是接口）报错
         with open(LOG_PATH, "a", encoding="utf-8", errors="replace") as f:
             f.write(line + "\n")
+        _restrict(LOG_PATH)
     except Exception:
         pass
 
