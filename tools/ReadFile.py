@@ -29,13 +29,13 @@ def read_file(filepath: str) -> str:
     try:
         target = _resolve(filepath)
     except (ValueError, RuntimeError) as e:
-        return f"Error: {e}"
+        return f"错误：{e}"
     if not os.path.exists(target):
-        return "Error: 文件不存在"
+        return "错误：文件不存在"
     if os.path.isdir(target):
-        return "Error: 目标为目录，请使用 list_dir"
+        return "错误：目标为目录，请使用 list_dir"
     try:
         with open(target, "r", encoding="utf-8", errors="replace") as f:
             return f.read()
     except Exception as e:
-        return f"Error: 读取失败: {e}"
+        return f"错误：读取失败：{e}"

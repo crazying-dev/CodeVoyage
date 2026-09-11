@@ -67,6 +67,61 @@ const gitName = ref('')
 const gitEmail = ref('')
 const savingId = ref(0)
 
+interface ProxyState {
+  proxy_url: string
+  active: boolean
+  mode: string
+  local: Record<string, any>
+  nodes: { node_id: string; email: string; port: number; github_ok: boolean; mine: boolean }[]
+  stats: Record<string, any>
+  error: string
+}
+
+const proxy = ref<ProxyState | null>(null)
+const proxyUse = ref(true)
+const proxyHelper = ref(true)
+const proxyBusy = ref('')
+const proxyTest = ref<{ ok: boolean; via?: string; seconds?: number; reason?: string } | null>(null)
+
+async function loadProxy() {
+  proxyBusy.value = 'load'
+  try {
+    const st = await postJSON<ProxyState>('/api/proxy/status', {})
+    proxy.value = st
+    proxyUse.value = !!st.local?.enabled
+    proxyHelper.value = !!st.local?.as_helper
+  } catch (e: any) {
+    err.value = e?.message || String(e)
+  } finally {
+    proxyBusy.value = ''
+  }
+}
+
+async function saveProxy() {
+  try {
+    const st = await postJSON<ProxyState>('/api/proxy/status', {
+      enabled: proxyUse.value,
+      as_helper: proxyHelper.value,
+    })
+    proxy.value = st
+    msg.value = '代理设置已更新'
+  } catch (e: any) {
+    err.value = e?.message || String(e)
+  }
+}
+
+async function testProxy() {
+  proxyBusy.value = 'test'
+  proxyTest.value = null
+  try {
+    proxyTest.value = await postJSON('/api/proxy/test', {})
+  } catch (e: any) {
+    err.value = e?.message || String(e)
+  } finally {
+    proxyBusy.value = ''
+  }
+}
+
 const menu = ref<{ show: boolean; x: number; y: number; items: { label: string; run: () => void }[] }>({
   show: false, x: 0, y: 0, items: [],
 })
@@ -490,6 +545,54 @@ onUnmounted(() => {
         <button class="primary" @click="saveIdentity">保存</button>
         <span class="muted small">用于 git 提交与 PR 的作者信息</span>
       </div>
+    </div>
+
+    <div class="panel">
+      <div class="row head-row">
+        <h3>GitHub 代理（客户端互助）</h3>
+        <div class="spacer"></div>
+        <button :disabled="!!proxyBusy" @click="loadProxy">刷新</button>
+        <button :disabled="!!proxyBusy" @click="testProxy">
+          {{ proxyBusy === 'test' ? '测试中…' : '连接自检' }}
+        </button>
+      </div>
+      <p class="hint">
+        直连 GitHub 超时时，自动经由其它可连的客户端代连（先打洞、失败走服务端中继）。
+        代连方只做 TLS 盲转发，看不到你的令牌与代码。默认开启，可随时关闭。详见
+        <RouterLink to="/agreement" target="_blank">《用户协议》</RouterLink>。
+      </p>
+      <div class="row wrap">
+        <label class="check">
+          <input type="checkbox" v-model="proxyUse" @change="saveProxy" />
+          使用代理（借用他人网络访问 GitHub）
+        </label>
+        <label class="check">
+          <input type="checkbox" v-model="proxyHelper" @change="saveProxy" />
+          作为代连节点（为他人转发 GitHub 流量）
+        </label>
+      </div>
+      <p v-if="proxy" class="hint">
+        本地代理：<span class="mono">{{ proxy.proxy_url }}</span>
+        （{{ proxy.active ? '已就绪' : '未启用' }}） ·
+        模式：{{ proxy.mode === 'proxy' ? '走代理' : '直连' }} ·
+        在线代连节点：{{ (proxy.nodes || []).length }}
+      </p>
+      <p v-if="proxyTest" class="hint">
+        连接自检：
+        <span v-if="proxyTest.ok" class="status-tag ok">
+          成功（{{ proxyTest.via === 'direct' ? '打洞直连' : '服务端中继' }}，{{ proxyTest.seconds }}s）
+        </span>
+        <span v-else class="status-tag failed">失败：{{ proxyTest.reason }}</span>
+      </p>
+      <ul v-if="proxy" class="hint-list">
+        <li>
+          借用 {{ proxy.local?.borrow_count || 0 }} 次（打洞成功 {{ proxy.local?.direct_ok || 0 }} /
+          中继成功 {{ proxy.local?.relay_ok || 0 }} / 中继失败 {{ proxy.local?.relay_fails || 0 }}）
+        </li>
+        <li>代连 {{ proxy.local?.assist_count || 0 }} 次</li>
+        <li v-if="proxy.local?.last_event">最近：{{ proxy.local.last_event }}</li>
+        <li v-if="proxy.error">服务端协调不可用：{{ proxy.error }}</li>
+      </ul>
     </div>
 
     <div v-if="editRepo" class="panel">

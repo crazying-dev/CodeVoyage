@@ -9,13 +9,13 @@ def list_dir(path: str = ".") -> str:
     try:
         target = ReadFile._resolve(path or ".")
     except (ValueError, RuntimeError) as e:
-        return f"Error: {e}"
+        return f"错误：{e}"
     if not os.path.isdir(target):
-        return "Error: 目录不存在"
+        return "错误：目录不存在"
     try:
         names = sorted(os.listdir(target), key=str.lower)
     except Exception as e:
-        return f"Error: {e}"
+        return f"错误：{e}"
     lines = []
     for n in names:
         full = os.path.join(target, n)

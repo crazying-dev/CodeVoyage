@@ -10,7 +10,7 @@ const logged = computed(() => isLoggedIn() && route.path !== '/login')
 
 const NAV = [
   { to: '/overview', label: 'Agent 运行' },
-  { to: '/tasks', label: '任务记录' },
+  { to: '/chat', label: 'AI 对话' },
   { to: '/config', label: '配置' },
   { to: '/diagnostics', label: '诊断' },
   { to: '/logs', label: '运行日志' },

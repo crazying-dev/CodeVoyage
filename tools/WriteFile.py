@@ -9,15 +9,15 @@ def write_file(filepath: str, content: str) -> str:
     try:
         target = ReadFile._resolve(filepath)
     except (ValueError, RuntimeError) as e:
-        return f"Error: {e}"
+        return f"错误：{e}"
     if not ReadFile.WORKSPACE:
-        return "Error: workspace 未初始化"
+        return "错误：workspace 未初始化"
     if os.path.abspath(target).replace("\\", "/").endswith(".git") or "/.git/" in os.path.abspath(target).replace("\\", "/"):
-        return "Error: 不允许修改 .git 目录"
+        return "错误：不允许修改 .git 目录"
     os.makedirs(os.path.dirname(target), exist_ok=True)
     try:
         with open(target, "w", encoding="utf-8") as f:
             f.write(content or "")
         return f"OK: 已写入 {filepath}（{len(content or '')} 字符）"
     except Exception as e:
-        return f"Error: 写入失败: {e}"
+        return f"错误：写入失败：{e}"

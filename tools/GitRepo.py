@@ -190,7 +190,12 @@ def push(dest: str, repo_full: str, token: str, branch: str) -> None:
 
 
 def changed_files(dest: str) -> str:
-    return _run(dest, "diff", "--stat", "HEAD")
+    """工作区相对 HEAD 的改动清单（含新增的未跟踪文件）。
+
+    不能用 `git diff HEAD`：它只统计已跟踪文件，新建文件是未跟踪状态，
+    不会出现在 diff 里，从而被误判为「没有任何文件改动」。
+    """
+    return _run(dest, "status", "--porcelain")
 
 
 def remove_dir(dest: str) -> None:

@@ -65,6 +65,53 @@ tools = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "clone_repo",
+            "description": "克隆本次 Issue 所属仓库到工作区。开始任何文件读写前必须先调用（会自动按顺序尝试可用令牌）。",
+            "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_branch",
+            "description": "基于仓库默认分支创建并切换到本次任务的分支。clone_repo 之后、修改文件之前调用。",
+            "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "commit_and_push",
+            "description": "提交工作区全部改动并推送到当前分支。改动完成后调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string", "description": "提交信息，一句话说明本次改动"}
+                },
+                "required": ["message"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_pull_request",
+            "description": "调用 GitHub API 创建 Pull Request，是任务的最后一步；推送成功后调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "PR 标题"},
+                    "body": {"type": "string", "description": "PR 正文，Markdown，说明改了什么"},
+                },
+                "required": ["title", "body"],
+                "additionalProperties": False,
+            },
+        },
+    },
 ]
 
 # 名称到执行函数的映射（新增工具需同步登记）
@@ -73,4 +120,8 @@ tool_impl = {
     "write_file": "WriteFile.write_file",
     "list_dir": "ListDir.list_dir",
     "plan": "Plan.plan",
+    "clone_repo": "RepoOps.clone_repo",
+    "create_branch": "RepoOps.create_branch",
+    "commit_and_push": "RepoOps.commit_and_push",
+    "create_pull_request": "RepoOps.create_pull_request",
 }

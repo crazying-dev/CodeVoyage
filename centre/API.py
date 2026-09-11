@@ -11,7 +11,7 @@ import threading
 
 from flask import jsonify, request
 
-from centre import core, credentials, net, paths, remote, trace
+from centre import chat, core, credentials, net, paths, proxy, remote, trace
 
 
 def register(app):
@@ -627,8 +627,10 @@ def register(app):
             return jsonify({"message": "repo_full or uuid missing"}), 400
         found = trace.load(repo_full, uid)
         if not found:
-            return jsonify({"message": "trace not found"}), 404
-        return jsonify({"message": "OK", "trace": found})
+            # 旧版本任务没落轨迹、或轨迹已被清理：属正常状态，返回 200 让前端友好展示，
+            # 不要用 404 —— 前端会把它当成「出错」，在项目对话里弹红色告警。
+            return jsonify({"message": "OK", "found": False, "trace": None})
+        return jsonify({"message": "OK", "found": True, "trace": found})
 
     @app.route("/api/Agent/trace/live", methods=["POST"])
     def agent_trace_live():
@@ -685,6 +687,68 @@ def register(app):
         except Exception as e:
             return jsonify({"message": "OK", "ok": False, "reason": str(e),
                             "seconds": round(_time.time() - started, 2)})
+
+    # ---------------------------------------------------------------
+    # AI 对话（多会话）：向已配置的 LLM 提问，历史存本机
+    # ---------------------------------------------------------------
+    @app.route("/api/chat/list", methods=["POST"])
+    def chat_list():
+        return jsonify({"message": "OK", "conversations": chat.list_conversations()})
+
+    @app.route("/api/chat/create", methods=["POST"])
+    def chat_create():
+        data = request.get_json(silent=True) or {}
+        return jsonify({"message": "OK", "conversation": chat.create(data.get("name") or "")})
+
+    @app.route("/api/chat/get", methods=["POST"])
+    def chat_get():
+        data = request.get_json(silent=True) or {}
+        conv = chat.get(data.get("id"))
+        if not conv:
+            return jsonify({"message": "会话不存在"}), 404
+        return jsonify({"message": "OK", "conversation": conv})
+
+    @app.route("/api/chat/remove", methods=["POST"])
+    def chat_remove():
+        data = request.get_json(silent=True) or {}
+        return jsonify({"message": "OK", "removed": chat.remove(data.get("id"))})
+
+    @app.route("/api/chat/rename", methods=["POST"])
+    def chat_rename():
+        data = request.get_json(silent=True) or {}
+        conv = chat.rename(data.get("id"), data.get("name") or "")
+        if not conv:
+            return jsonify({"message": "会话不存在"}), 404
+        return jsonify({"message": "OK", "conversation": conv})
+
+    @app.route("/api/chat/for-repo", methods=["POST"])
+    def chat_for_repo():
+        """取某仓库的对话（ID = 仓库名哈希，每个仓库唯一，没有就建）。"""
+        data = request.get_json(silent=True) or {}
+        repo_full = (data.get("repo_full") or "").strip()
+        if not repo_full:
+            return jsonify({"message": "repo_full missing"}), 400
+        conv = chat.get_by_repo(repo_full)
+        if not conv:
+            return jsonify({"message": "会话创建失败"}), 500
+        return jsonify({"message": "OK", "conversation": conv})
+
+    @app.route("/api/chat/ask", methods=["POST"])
+    def chat_ask():
+        """提问必须带会话 ID；仓库对话的 ID 由 /api/chat/for-repo 解析得到。"""
+        data = request.get_json(silent=True) or {}
+        cid = (data.get("id") or "").strip()
+        if not cid:
+            return jsonify({"message": "缺少对话 ID"}), 400
+        if not chat.get(cid):
+            return jsonify({"message": "会话不存在，请重新打开该对话"}), 404
+        try:
+            result = chat.ask(cid, data.get("text") or "")
+        except chat.ChatError as e:
+            return jsonify({"message": str(e)}), 502
+        except Exception as e:
+            return jsonify({"message": f"提问失败：{e}"}), 502
+        return jsonify({"message": "OK", **result})
 
     @app.route("/api/Agent/logs", methods=["GET"])
     def agent_logs():

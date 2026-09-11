@@ -69,6 +69,13 @@ def _exec_tool(name: str, arguments: str) -> str:
         return f"Error: tool `{name}` 执行失败: {e}"
 
 
+def _check_tool(result) -> None:
+    """兜底调用工具时，返回以「错误：/Error:」开头表示失败，直接抛出避免假成功。"""
+    text = str(result or "")
+    if text.startswith(("错误：", "错误:", "Error:", "Error：")):
+        raise AgentError(text)
+
+
 def _build_issue_prompt(task: dict) -> str:
     lines = [
         f"仓库：{task['repo_full']}",
@@ -113,53 +120,21 @@ def run_task(task: dict) -> dict:
     if not llm_candidates:
         raise AgentError("未配置 LLM API Key，请在控制台「配置」页添加")
 
-    branch = f"codevoyage/issue-{issue_number}-{uid[:6]}"
     dest = os.path.join(paths.repo_dir(repo_full), "work", uid or "run")
 
     trace.start(repo_full, task)
     core.set_activity({"running_uuid": uid, "repo_full": repo_full,
-                       "status": "running", "note": "克隆仓库"})
+                       "status": "running", "note": "AI 操作仓库中"})
     os.makedirs(os.path.dirname(dest), exist_ok=True)
 
-    from tools import GitRepo, ReadFile
+    from tools import GitRepo, ReadFile, RepoOps
+
+    # 克隆 / 建分支 / 提交推送 / 建 PR 全部由 AI 调用工具完成；
+    # 这里只注入上下文并先划定工作区边界（文件工具一律限制在此目录内）。
+    RepoOps.set_context(repo_full, uid, issue_number, dest)
+    ReadFile.set_workspace(dest)
 
     try:
-        # 依次尝试各令牌克隆，第一个成功即采用
-        gh_token, token_source, clone_error = "", "", None
-        for idx, (cand_token, cand_source) in enumerate(token_candidates, start=1):
-            GitRepo.remove_dir(dest)
-            try:
-                GitRepo.clone(repo_full, cand_token, dest)
-                gh_token, token_source = cand_token, cand_source
-                note = (
-                    f"克隆成功（第 {idx} 个令牌，来源 "
-                    f"{'仓库专属/细粒度' if cand_source == 'repo' else '全局/传统'}）"
-                )
-                paths.append_log(f"[{repo_full}#{issue_number}] {note}")
-                trace.append(repo_full, uid, {"type": "note", "content": note})
-                break
-            except Exception as e:
-                clone_error = e
-                paths.append_log(f"[{repo_full}#{issue_number}] 第 {idx} 个令牌克隆失败：{e}")
-        if not gh_token:
-            hint = ""
-            low = str(clone_error).lower()
-            if any(k in low for k in ("connect", "timed out", "timeout", "resolve host", "unable to access", "network")):
-                hint = "（网络类失败，已按 5 次 / 5 秒重试；如网络受限可设置环境变量 CODEVOYAGE_PROXY）"
-            raise AgentError(f"全部 {len(token_candidates)} 个令牌都无法克隆仓库：{clone_error}{hint}")
-
-        default = ""
-        try:
-            from GithubTool import user as gh_user
-
-            default = proxy.github_call(gh_user.default_branch, gh_token, repo_full)
-        except Exception:
-            default = ""
-        if not default:
-            default = GitRepo.current_branch(dest)
-
-        GitRepo.create_branch(dest, branch)
-        ReadFile.set_workspace(dest)
 
         # ---------------- 组装提示（带上一轮会话摘要，实现会话复用） ----------------
         work_abs = os.path.abspath(dest)
@@ -174,24 +149,29 @@ def run_task(task: dict) -> dict:
 
         final_content = _run_llm_loop(repo_full, uid, messages, llm_candidates, issue_number)
 
-        # ---------------- 提交、推送、建 PR ----------------
+        # ---------------- 收尾：AI 若漏了最后几步，程序兜底，保证改动不丢 ----------------
         conclusion = _extract_conclusion(final_content)
-        commit_message = conclusion or final_content[:500] or f"AI fix: {task.get('title') or ''} (#{issue_number})"
         pr_title = f"{task.get('title') or 'AI fix'} (#{issue_number})"[:100]
-        pr_body = final_content
 
-        core.set_activity({"note": "git 提交并推送"})
-        git_name, git_email = paths.git_identity()
-        GitRepo.commit_all(dest, commit_message, name=git_name, email=git_email)
-        trace.append(repo_full, uid, {"type": "note", "content": f"已提交：{commit_message[:200]}"})
-        GitRepo.push(dest, repo_full, gh_token, branch)
+        if not RepoOps.state()["cloned"]:
+            raise AgentError("AI 未调用 clone_repo 克隆仓库，任务未完成")
+        if not RepoOps.state()["branch"]:
+            trace.append(repo_full, uid, {"type": "note", "content": "AI 未创建分支，程序兜底创建"})
+            _check_tool(RepoOps.create_branch())
+        if not RepoOps.state()["pushed"]:
+            if not GitRepo.changed_files(dest).strip():
+                raise AgentError("AI 未产生任何文件改动")
+            trace.append(repo_full, uid, {"type": "note", "content": "AI 未提交，程序兜底提交并推送"})
+            core.set_activity({"note": "兜底提交并推送"})
+            _check_tool(RepoOps.commit_and_push(conclusion or final_content[:500] or pr_title))
+        if not RepoOps.state()["pr_url"]:
+            trace.append(repo_full, uid, {"type": "note", "content": "AI 未建 PR，程序兜底创建"})
+            _check_tool(RepoOps.create_pull_request(pr_title, final_content))
 
-        from GithubTool import user as gh_user
-
-        pr_url = proxy.github_call(gh_user.create_pr, gh_token, repo_full, branch, default,
-                                   pr_title, pr_body)
-        paths.append_log(f"[{repo_full}#{issue_number}] 已创建 PR: {pr_url}")
-        trace.append(repo_full, uid, {"type": "note", "content": f"已创建 PR：{pr_url}"})
+        pr_url = RepoOps.state()["pr_url"]
+        if not pr_url:
+            raise AgentError("未获得 PR 链接，任务未真正完成")
+        paths.append_log(f"[{repo_full}#{issue_number}] 已完成，PR：{pr_url}")
         trace.finish(repo_full, uid, "ok")
         return {"status": "ok", "pr_url": pr_url, "conclusion": conclusion}
     except Exception as e:

@@ -550,16 +550,22 @@ def append_log(message: str) -> None:
 
     line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}"
     try:
-        with open(LOG_PATH, "a", encoding="utf-8") as f:
+        # errors="replace"：日志内容含非法字符时也不能让调用方（进而是接口）报错
+        with open(LOG_PATH, "a", encoding="utf-8", errors="replace") as f:
             f.write(line + "\n")
-    except OSError:
+    except Exception:
         pass
 
 
 def tail_log(limit: int = 200) -> str:
+    """读取日志尾部。日志可能被外部编辑/并发写入弄坏编码，这里容错解码，绝不抛异常。
+
+    注意：解码失败抛的是 UnicodeDecodeError（ValueError 子类），不是 OSError，
+    只 catch OSError 会让接口直接 500（首页 / 日志页曾因此报错）。
+    """
     try:
-        with open(LOG_PATH, "r", encoding="utf-8") as f:
+        with open(LOG_PATH, "r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
         return "".join(lines[-limit:])
-    except OSError:
+    except Exception:
         return ""
