@@ -7,6 +7,10 @@
 3. 隧道建立后把 socket 交给调用方——本地 CONNECT 代理（centre.proxy）用它承载
    git / requests 的 TLS 流量。
 
+安全（审计整改）：本组件只是「借用他人代连」的能力提供方，不监听端口、不向
+信令服务器登记；目标一律经 centre.proxy.is_allowed_target 校验（白名单 + 公网地址）。
+是否真正使用代理由 centre.proxy 的 enabled 开关决定（默认关闭）。
+
 由 main.py 启动（启动即把 open_tunnel 注册给 centre.proxy）；也可单独运行：
 python ProxySender.py
 """
@@ -21,7 +25,7 @@ MAX_RELAY_FAILS = proxy.RELAY_MAX_FAILS
 def ensure_started() -> bool:
     """把发信能力注册给公共模块，本地 CONNECT 代理即可复用。"""
     proxy.set_opener(open_tunnel)
-    proxy.log("发信组件已就绪")
+    proxy.log("发信组件已就绪（默认不启用代理；启用由 centre.proxy 的 enabled 开关控制）")
     return True
 
 
@@ -59,8 +63,9 @@ def handshake(sock: socket.socket, sid: str, token: str, role: str, target: str)
 # ---------------------------------------------------------------- 打洞 / 中继
 def open_tunnel(target: str, exclude=None) -> tuple[socket.socket, str]:
     """建立到 target 的隧道，返回 (socket, 'direct'|'relay')。"""
-    if target not in proxy.ALLOWED_TARGETS:
-        raise proxy.ProxyError(f"目标不在白名单内：{target}")
+    target = str(target or "").strip().lower()
+    if not proxy.is_allowed_target(target):
+        raise proxy.ProxyError(f"目标不在白名单内（或解析到非公网地址）：{target}")
     session = request_session(exclude)
     sid, token = session["sid"], session["token"]
     candidates = session.get("candidates") or []

@@ -4,7 +4,9 @@
 - 默认剔除系统代理环境变量（HTTP_PROXY/HTTPS_PROXY 等），避免被失效代理拖死；
   如需代理，设置 CODEVOYAGE_PROXY 后重启；
 - 网络类命令（clone/fetch/push）失败自动重试，默认 5 次、间隔 5 秒
-  （可用 CODEVOYAGE_RETRY / CODEVOYAGE_RETRY_INTERVAL 调整）。
+  （可用 CODEVOYAGE_RETRY / CODEVOYAGE_RETRY_INTERVAL 调整）；
+- 所有按“相对路径”操作文件的函数（write_file / changed / commit_paths）都经
+  `_safe_join` 强制校验，杜绝 `..`、绝对路径与符号链接逃逸。
 """
 import os
 import shutil
@@ -44,6 +46,37 @@ def _log(message: str) -> None:
         paths.append_log(message)
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------- 路径安全
+def _safe_join(dest: str, rel_path: str) -> str:
+    """把相对路径拼到工作区内，并做强制越界校验。
+
+    拒绝：空路径 / 含 `\\x00`、绝对路径（含盘符、UNC、`~`）、任何一段为 `..`、
+    以及 realpath 归一化后跑到工作区之外的路径（符号链接逃逸）。
+    """
+    base = os.path.realpath(os.path.abspath(str(dest or "")))
+    if not str(dest or "").strip():
+        raise ValueError("工作区路径为空，已拒绝")
+    if not os.path.isdir(base):
+        raise RuntimeError(f"工作区不存在: {dest}")
+    raw = str(rel_path or "").strip()
+    if not raw:
+        raise ValueError("路径不能为空")
+    if "\x00" in raw:
+        raise ValueError("路径包含非法字符")
+    normalized = raw.replace("\\", "/")
+    drive, _tail = os.path.splitdrive(normalized)
+    if drive or normalized.startswith("/") or normalized.startswith("~"):
+        raise ValueError("不支持绝对路径")
+    parts = [p for p in normalized.split("/") if p not in ("", ".")]
+    if any(p == ".." for p in parts):
+        raise ValueError(f"路径包含 .. 越权参数，已拒绝：{rel_path}")
+    target = os.path.realpath(os.path.join(base, *parts)) if parts else base
+    base_cmp, target_cmp = os.path.normcase(base), os.path.normcase(target)
+    if target_cmp != base_cmp and not target_cmp.startswith(base_cmp + os.sep):
+        raise ValueError(f"路径超出工作区，已拒绝：{rel_path}")
+    return target
 
 
 def _git_env() -> dict:
@@ -142,8 +175,8 @@ def set_identity(dest: str, name: str, email: str) -> None:
 
 
 def write_file(dest: str, rel_path: str, content: str) -> str:
-    """在工作区内写入文件（自动创建目录）。"""
-    target = os.path.join(dest, rel_path.replace("/", os.sep))
+    """在工作区内写入文件（自动创建目录）。越界路径抛 ValueError / RuntimeError。"""
+    target = _safe_join(dest, rel_path)
     os.makedirs(os.path.dirname(target), exist_ok=True)
     with open(target, "w", encoding="utf-8", newline="\n") as f:
         f.write(content)
@@ -152,12 +185,20 @@ def write_file(dest: str, rel_path: str, content: str) -> str:
 
 def changed(dest: str, path: str) -> bool:
     """判断指定路径相对 HEAD 是否有改动（新增/修改均算）。"""
-    return bool(_run(dest, "status", "--porcelain", "--", path))
+    target = _safe_join(dest, path)
+    rel = os.path.relpath(target, os.path.realpath(os.path.abspath(dest)))
+    return bool(_run(dest, "status", "--porcelain", "--", rel))
 
 
 def commit_paths(dest: str, paths: list, message: str) -> str:
     """只提交指定路径，返回 commit 短哈希。"""
-    _run(dest, "add", "--", *paths)
+    rels = []
+    for path in paths or []:
+        target = _safe_join(dest, path)
+        rels.append(os.path.relpath(target, os.path.realpath(os.path.abspath(dest))))
+    if not rels:
+        raise ValueError("未指定要提交的路径")
+    _run(dest, "add", "--", *rels)
     staged = _run(dest, "diff", "--cached", "--name-only")
     if not staged:
         raise RuntimeError("没有产生任何文件改动")

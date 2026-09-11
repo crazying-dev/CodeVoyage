@@ -4,3 +4,6 @@ pygithub
 openai
 pystray
 Pillow
+# 本地敏感配置 / 凭据缓存的加密（Fernet：AES-128-CBC + HMAC）。
+# 未安装时自动回退到标准库实现（HMAC-SHA256 计数器模式 + HMAC 认证标签），仍可运行。
+cryptography

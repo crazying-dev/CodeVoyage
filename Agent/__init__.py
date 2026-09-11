@@ -7,19 +7,59 @@
 3. 执行（Agent.main.run_task：克隆/AI 修改/提交/推送/PR）：
    - 成功：本地 done + pr_url，远端回执 OK；
    - 失败：本地 failed + error，远端回执 Failed。
+
+安全（审计整改）：回执给远端的 error 文本先做脱敏（`_sanitize_error`）——去掉本机
+绝对路径、用户目录、令牌样式与带凭据的 URL。原始异常只写入本机日志供排查，不会
+离开本机（避免把内部路径 / 令牌片段通过远端接口泄露出去）。
 """
+import re
 import time
 
 import Agent.main as runner
 from centre import core, notify, paths, remote
 
+# 需要脱敏的凭据样式
+_SECRET_PATTERNS = (
+    re.compile(r"github_pat_[A-Za-z0-9_]{8,}"),
+    re.compile(r"gh[pousr]_[A-Za-z0-9]{8,}"),
+    re.compile(r"sk-[A-Za-z0-9_\-]{8,}"),
+    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]{8,}"),
+    re.compile(r"(?i)\bauthorization\s*[:=]\s*\S+"),
+    re.compile(r"(https?://)[^/\s:@]+:[^/\s@]+@"),          # URL 内嵌凭据
+)
+
+# 需要脱敏的本机路径样式
+_PATH_PATTERNS = (
+    re.compile(r"[A-Za-z]:\\[^\s\"'<>|,;)]+"),              # Windows 绝对路径
+    re.compile(r"\\\\[^\s\"'<>|,;)]+"),                     # UNC 路径
+    re.compile(r"/(?:home|Users|root|tmp)/[^\s\"'<>|,;)]+"),  # 常见 *nix 用户目录
+)
+
+
+def _sanitize_error(err, limit: int = 800) -> str:
+    """错误信息脱敏：本机路径 / 凭据 → 占位符，并截断长度。用于回执远端与本地展示。"""
+    text = str(err or "")
+    if not text:
+        return ""
+    for known in (paths.BASE_DIR, paths.REPO_DIR, paths.HOME_DIR):
+        if known:
+            text = text.replace(known, "<本地目录>")
+    for pat in _SECRET_PATTERNS:
+        text = pat.sub(lambda m: (m.group(1) + "***") if m.groups() else "***", text)
+    for pat in _PATH_PATTERNS:
+        text = pat.sub("<路径>", text)
+    text = text.strip()
+    if len(text) > limit:
+        text = text[:limit] + "…"
+    return text
+
 
 def _report(uuid: str, status: str, pr_url: str = "", error: str = "") -> None:
-    """向远端回执执行结果（失败不影响本地主流程）。"""
+    """向远端回执执行结果（失败不影响本地主流程）；error 一律先脱敏。"""
     try:
         remote.call(
             "/api/Issue/Result",
-            {"uuid": uuid, "status": status, "pr_url": pr_url, "error": error},
+            {"uuid": uuid, "status": status, "pr_url": pr_url, "error": _sanitize_error(error)},
             timeout=30,
         )
     except Exception as e:
@@ -62,15 +102,19 @@ def main():
         except Exception as e:
             if task:
                 uid = task["uuid"]
-                err_text = str(e)
-                if any(k in err_text for k in ("Permission", "permission", "403", "denied", "Authentication")):
+                raw = str(e)
+                err_text = _sanitize_error(raw)
+                if any(k in raw for k in ("Permission", "permission", "403", "denied", "Authentication")):
                     err_text += (
                         "\n提示：请检查 GitHub Token 权限。"
                         "传统令牌需勾选 repo（改 workflow 还需 workflow）；"
                         "细粒度令牌需勾选该仓库并授予 Contents / Pull requests / Workflows 读写。"
                     )
                 core.finish(uid, "failed", error=err_text)
-                paths.append_log(f"任务失败 {task.get('repo_full', '')}#{task.get('issue_number', '')}: {err_text}")
+                # 本机日志保留原文（不出本机），便于排查
+                paths.append_log(
+                    f"任务失败 {task.get('repo_full', '')}#{task.get('issue_number', '')}: {raw}"
+                )
                 _report(uid, "Failed", error=err_text)
             time.sleep(1)
 

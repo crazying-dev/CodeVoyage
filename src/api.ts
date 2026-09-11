@@ -41,7 +41,11 @@ export interface WorkflowFile {
   filename: string
 }
 
-/** 拉取 workflow 文本（代理返回 text/plain，需要单独解析 Content-Disposition）。 */
+/** 拉取 workflow 文本（代理返回 text/plain，需要单独解析 Content-Disposition）。
+ *
+ * 注意：响应体只能读取一次，失败分支读完 `resp.text()` 后必须直接抛出，
+ * 不能落到下面再读一次（第二次会得到空字符串，导致 workflow 解析为空）。
+ */
 export async function fetchWorkflow(bindingId: number | string): Promise<WorkflowFile> {
   const resp = await fetch('/api/repo/workflow', {
     method: 'POST',

@@ -190,6 +190,7 @@ def register(app):
                 "llm": len(cached.get("llm") or []),
                 "repo_tokens": sum(len(v) for v in (cached.get("repo_tokens") or {}).values()),
             },
+            "cache_disabled": paths.cred_cache_disabled(),
             "error": error,
         })
 
@@ -644,12 +645,15 @@ def register(app):
 
     # ---------------------------------------------------------------
     # GitHub 代理（跨客户端互助）：状态 / 开关 / 自检
+    # 安全默认：借用代连（enabled）与作为代连节点（as_helper）都默认关闭；
+    # 开启 as_helper 必须带 confirm=true（显式授权），否则忽略。
     # ---------------------------------------------------------------
     @app.route("/api/proxy/status", methods=["POST"])
     def proxy_status():
         data = request.get_json(silent=True) or {}
         if any(k in data for k in ("enabled", "as_helper")):
-            proxy.configure(enabled=data.get("enabled"), as_helper=data.get("as_helper"))
+            proxy.configure(enabled=data.get("enabled"), as_helper=data.get("as_helper"),
+                            confirm=bool(data.get("confirm")))
             proxy.ensure_started()
         st = proxy.status()
         nodes, stats, error = [], {}, ""
@@ -665,6 +669,8 @@ def register(app):
             "proxy_url": proxy.local_proxy_url(),
             "active": proxy.active(),
             "mode": "proxy" if proxy.in_proxy_mode() else "direct",
+            "helper_authorized": proxy.helper_authorized(),
+            "allowed_targets": sorted(proxy.allowed_targets()),
             "nodes": nodes,
             "stats": stats,
             "error": error,
