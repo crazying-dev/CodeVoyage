@@ -3,20 +3,22 @@
 单线程消费中心队列：
 1. 发现 waiting/confirming 任务 -> 置为 confirming，右下角弹窗 + 控制台按钮等待用户确认，
    超时（10s）默认执行；
-2. 用户放弃 -> 本地标记 putout，并向远端回执 PutOut；
-3. 执行（Agent.main.run_task：克隆/AI 修改/提交/推送/PR）：
-   - 成功：本地 done + pr_url，远端回执 OK；
-   - 失败：本地 failed + error，远端回执 Failed。
+2. 用户放弃 -> 本地标记 putout，向远端回执 PutOut，并在来源 Issue / PR 上自动回帖告知
+   （通知工作流，Issue #20）；
+3. 执行（Agent.main.run_task：克隆/AI 修改/提交/推送/PR/通知）：
+   - 成功：本地 done + pr_url，远端回执 OK，并在来源 Issue / PR 与新建 PR 上自动回帖；
+   - 失败：本地 failed + error，远端回执 Failed，并在来源 Issue / PR 上自动回帖说明原因。
 
 安全（审计整改）：回执给远端的 error 文本先做脱敏（`_sanitize_error`）——去掉本机
 绝对路径、用户目录、令牌样式与带凭据的 URL。原始异常只写入本机日志供排查，不会
-离开本机（避免把内部路径 / 令牌片段通过远端接口泄露出去）。
+离开本机（避免把内部路径 / 令牌片段通过远端接口泄露出去）。回帖内容在 centre.pr_notify
+里同样先脱敏，再发往 GitHub。
 """
 import re
 import time
 
 import Agent.main as runner
-from centre import branch_gc, core, notify, paths, remote
+from centre import branch_gc, core, notify, paths, pr_notify, remote
 
 # 需要脱敏的凭据样式
 _SECRET_PATTERNS = (
@@ -93,6 +95,9 @@ def main():
             if not agreed:
                 core.finish(uid, "putout", error="用户放弃")
                 paths.append_log(f"用户放弃：{repo_full}#{issue_no}")
+                # 通知工作流（Issue #20）：放弃执行也要回帖告知，避免 Issue / PR 侧无人知晓
+                pr_notify.on_task_finished(
+                    current, ok=False, error="用户在本机控制台放弃了本次任务。")
                 _report(uid, "PutOut")
                 continue
 

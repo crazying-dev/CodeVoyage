@@ -87,16 +87,24 @@ def ensure_repo_info(repo_full: str) -> None:
 
 
 def enqueue_issue(issue: dict) -> dict:
-    """把一条来自远端的 Issue 写入队列。重复（存在同编号未完成任务）时返回已有任务。"""
+    """把一条来自远端的 Issue / PR 事件写入队列。重复（同编号同来源且未完成）时返回已有任务。
+
+    通知工作流（Issue #20）需要的字段在这里落库：事件类型 / 动作、是否来自 PR、
+    PR 链接与编号、评论作者（供自动回帖时 @ 触发者）。
+    """
     repo_full = issue.get("repo_full") or ""
     issue_number = issue.get("issue_number")
     if not repo_full:
         raise ValueError("repo_full missing")
+    is_pr = bool(issue.get("is_pull_request"))
     with _lock:
         ensure_repo_info(repo_full)
         tasks = _read_tasks(repo_full)
         for t in tasks:
-            if t.get("issue_number") == issue_number and t.get("state") in ("waiting", "confirming", "running"):
+            # 去重必须区分来源：Issue #20 与 PR #20 是两条不同的任务
+            if (t.get("issue_number") == issue_number
+                    and bool(t.get("is_pull_request")) == is_pr
+                    and t.get("state") in ("waiting", "confirming", "running")):
                 return t
         task = {
             "uuid": issue.get("uuid"),
@@ -109,6 +117,13 @@ def enqueue_issue(issue: dict) -> dict:
             "comments": issue.get("comments") or [],
             "trigger_word": issue.get("trigger_word") or "",
             "trigger_source": issue.get("trigger_source") or "",
+            # 以下字段供通知工作流使用（缺省时保持向后兼容）
+            "event_type": issue.get("event_type") or issue.get("trigger_source") or "",
+            "event_action": issue.get("event_action") or "",
+            "comment_author": issue.get("comment_author") or "",
+            "is_pull_request": is_pr,
+            "trigger_pr_number": issue.get("pr_number") or 0,
+            "trigger_pr_url": issue.get("pr_url") or "",
             "state": "waiting",
             "received_at": _now(),
             "updated_at": _now(),
@@ -121,7 +136,8 @@ def enqueue_issue(issue: dict) -> dict:
         tasks.insert(0, task)
         tasks = tasks[:200]
         _write_tasks(repo_full, tasks)
-        paths.append_log(f"收到任务 {repo_full}#{issue_number} -> {task['uuid'][:8]}")
+        kind = "PR" if is_pr else "Issue"
+        paths.append_log(f"收到任务 {repo_full}{kind}#{issue_number} -> {task['uuid'][:8]}")
         return task
 
 

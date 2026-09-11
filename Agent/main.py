@@ -7,9 +7,11 @@
 4. 全过程写入执行轨迹（centre.trace），控制台可实时查看与事后回看；
 5. 解析最终答复中的 Conclusion，作为提交信息；
 6. git 提交并推送分支，调用 GitHub API 创建 Pull Request；
-7. 登记本次工作分支（centre.branch_gc）：PR 合并进默认分支后由后台巡检自动销毁，
+7. 通知工作流（Issue #20）：任务结束（成功 / 失败）后在来源 Issue / PR 上自动回帖，
+   成功附 PR 链接与结论摘要，失败附脱敏原因；通知失败只写日志，不影响任务结果；
+8. 登记本次工作分支（centre.branch_gc）：PR 合并进默认分支后由后台巡检自动销毁，
    保证项目仓库的分支管理规范可维护（Issue #13）；
-8. 返回结果由上层回执给远端。
+9. 返回结果由上层回执给远端。
 
 工作区安全：work 目录名由远端下发的任务 uuid 拼成，注入文件工具之前必须
 （1）用 `paths.safe_name` 清洗 uuid；（2）校验最终路径位于 `paths.REPO_DIR` 之内；
@@ -24,7 +26,7 @@ import os
 
 import config
 import Info
-from centre import branch_gc, core, credentials, paths, proxy, trace
+from centre import branch_gc, core, credentials, paths, pr_notify, proxy, trace
 
 _MAX_ITERATIONS = 80
 
@@ -97,6 +99,18 @@ def _build_issue_prompt(task: dict) -> str:
         f"仓库：{task['repo_full']}",
         f"Issue #{task.get('issue_number')}：{task.get('title') or '(无标题)'}",
         f"Issue 链接：{task.get('issue_url') or ''}",
+    ]
+    # 通知工作流（Issue #20）：任务可能由 PR 事件（PR 提交 / 更新 / 评论）触发
+    if task.get("is_pull_request"):
+        action = task.get("event_action") or ""
+        lines += [
+            f"触发来源：Pull Request #{task.get('issue_number')}"
+            + (f"（事件：{action}）" if action else ""),
+            f"PR 链接：{task.get('trigger_pr_url') or task.get('issue_url') or ''}",
+            "注意：这是 PR 事件任务，请先看懂该 PR 的改动与评论再动代码；"
+            "改动仍按「建分支 → 提交 → 新建 PR」推进，不要直接修改该 PR 的分支。",
+        ]
+    lines += [
         "",
         "Issue 内容：",
         str(task.get("body_text") or task.get("body") or "(空)"),
@@ -115,7 +129,7 @@ def _build_issue_prompt(task: dict) -> str:
 
 
 def run_task(task: dict) -> dict:
-    """执行单个 Issue 任务，返回 {status, pr_url, conclusion}。异常以 AgentError 抛出。"""
+    """执行单个 Issue / PR 任务，返回 {status, pr_url, conclusion}。异常以 AgentError 抛出。"""
     repo_full = task["repo_full"]
     uid = task.get("uuid", "")
     issue_number = task.get("issue_number")
@@ -197,12 +211,25 @@ def run_task(task: dict) -> dict:
         # 只登记不删除，避免 PR 尚未合并时误删工作分支。
         branch_gc.register(repo_full, RepoOps.state().get("branch", ""), pr_url)
 
+        # 通知工作流（Issue #20）：PR 提交成功后自动回帖，把 PR 链接与结论
+        # 同步给来源 Issue / PR 的关注者；通知失败只写日志，不影响任务结果。
+        notify_result = pr_notify.on_task_finished(task, pr_url=pr_url, ok=True, conclusion=conclusion)
+        if notify_result.get("posted"):
+            trace.append(repo_full, uid, {"type": "note",
+                                          "content": "已自动回帖通知：" + "、".join(notify_result["urls"])})
+
         paths.append_log(f"[{repo_full}#{issue_number}] 已完成，PR：{pr_url}")
         trace.finish(repo_full, uid, "ok")
         return {"status": "ok", "pr_url": pr_url, "conclusion": conclusion}
     except Exception as e:
         trace.append(repo_full, uid, {"type": "error", "content": str(e)})
         trace.finish(repo_full, uid, "failed", str(e))
+        # 失败也要通知（Issue #20）：在来源 Issue / PR 回帖说明原因，避免关注者干等
+        try:
+            pr_notify.on_task_finished(task, pr_url=RepoOps.state().get("pr_url", ""),
+                                       ok=False, error=str(e))
+        except Exception:
+            pass
         raise
     finally:
         # 成功/失败都清理临时克隆，避免磁盘膨胀

@@ -30,6 +30,8 @@ CodeVoyage是一个通过[`Action Workflow`](https://docs.github.com/zh/actions)
 2. AI处理后的代码以[`Pull requests`](https://docs.github.com/en/rest/pulls)提交，全程更透明，不用担心AI发疯导致仓库损坏
 3. AI处理沙盒运行，不导致AI发疯导致电脑错误
 4. PR合并进主分支后，本次工作分支（`codevoyage/*`）会被自动销毁，仓库分支列表不会堆积
+5. 完整通知工作流（Issue #20）：任务结束（PR 提交成功 / 失败）后自动在来源 `Issue` 与新建的 `PR` 上回帖，
+   附 PR 链接、结论摘要或失败原因，关注者不用自己去翻 GitHub 通知
 
 ---
 
@@ -45,6 +47,31 @@ CodeVoyage是一个通过[`Action Workflow`](https://docs.github.com/zh/actions)
 4. **GitHub 代理默认关闭**：借用他人代连（`enabled`）与「本机作为代连节点」（`as_helper`）默认都不开启；
    开启代连节点必须显式授权（`confirm`），且只允许转发白名单内的公网目标，并限制并发、记录审计日志。
 5. **远端回执脱敏**：回执给服务端的错误信息会去掉本机路径、令牌样式与带凭据的 URL。
+6. **自动回帖只评论、不破坏**：通知工作流只调用「创建评论」接口，
+   不合并 / 不关闭 / 不删除任何 PR 与分支，也不修改 PR 分支；评论内容先脱敏（本机路径、令牌样式）再发送。
+
+---
+
+## 通知工作流（Issue #20）
+除了「自动处理 Issue」，CodeVoyage 还会把结果**主动通知**回 GitHub，避免 PR 提交后无人知晓。
+
+触发来源（workflow 上报）：
+1. `issues`：Issue 被创建 / 编辑；
+2. `issue_comment`：Issue **或 PR** 的评论（PR 评论也属于 `issue_comment`，会带上 `is_pull_request` 标记）；
+3. `pull_request`：PR 提交 / 更新 / 重新打开 / 转为可评审 / 关闭（上报 PR 编号、标题、正文、源分支、目标分支、是否草稿、是否已合并）。
+
+自动回帖（`centre/pr_notify.py`，由 `Agent` 在任务结束时调用）：
+- **成功**：在来源 Issue / PR 回帖，附新建 PR 链接与 `Conclusion` 摘要；同时在该 PR 上回帖结论摘要，
+  评论触发的场景还会 `@` 触发者；
+- **失败**：在来源 Issue / PR 回帖，附脱敏后的失败原因与常见排查方向（令牌权限、仓库可见性、网络等）；
+- 同一条通知带隐藏标记，任务重跑不会重复刷屏；
+- 通知是「尽力而为」：任何异常只写入本机 `agent.log`，绝不影响 PR 结果与任务状态；
+- 默认开启，可用环境变量 `CODEVOYAGE_DISABLE_PR_NOTIFY=1` 关闭。
+
+代码位置：
+- `GithubTool/pulls.py`：PR 读取与评论（只读 + 评论，用于通知载体与去重标记）；
+- `centre/pr_notify.py`：通知正文拼装、脱敏、令牌顺序回退与发送；
+- `Agent/main.py`：任务成功 / 失败后触发通知，PR 事件触发的任务会在提示词里带上 PR 上下文。
 
 ---
 
@@ -59,6 +86,11 @@ Server -> `GetIssue`  本连接长轮询
 
 Agent服务循环获取最新任务，若获取到的任务的仓库未在执行就弹窗提醒有新的Issue并附上Issue信息若用户10s未操作或点击Yes就开始执行，执行完成后删除本条Issue并将Issue的记录告诉Server已完成，若点击No就删除本条Issue队列，并告诉Server用户放弃执行
 执行完成后将内容以Pr的方式提交，PR提交信息就填Conclusion(见后文)的内容
+
+任务结束后的通知（见「通知工作流」）：
+1. PR 创建成功 -> 在来源 Issue / PR 与新建 PR 上自动回帖（链接 + 结论摘要）
+2. 任务失败 -> 在来源 Issue / PR 上自动回帖（失败原因，已脱敏）
+3. PR 事件（提交 / 更新 / 关闭）触发的任务同样会回帖到该 PR，PR 侧不再只有 GitHub 的默认通知
 
 工作分支的生命周期（见Issue #13）：
 1. Agent执行任务时创建`codevoyage/issue-<编号>-<uuid前6位>`工作分支并推送，然后创建PR
