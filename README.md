@@ -42,3 +42,32 @@ CodeVoyage是一个通过[`Action Workflow`](https://docs.github.com/zh/actions)
 
 
 注：每个仓库只能被一个用户绑定，绑定后用户设置关键词，生成workflow文件并指导用户放在指定位置，当某个Issue中的某个对话由管理员发起且包含关键词就将Issue的URL给到https://CodeVoyage.yjlt.top/api/Github/Issue
+
+---
+
+## 环境变量
+
+在项目根目录放一个 `.env`（可用 `.env.example` 作模板）：
+
+| 变量 | 说明 |
+| --- | --- |
+| `PORT` | 监听端口，默认 5431 |
+| `WEBHOOK_SECRET` | workflow 上报的签名密钥。生成 workflow 时会**直接写进文件**，无需再配置仓库 Secrets |
+| `PUBLIC_BASE_URL` | 对外可访问的服务地址，用于写死进 workflow；留空则按请求推断（非本机默认 https） |
+| `DATABASE_URL` | 数据库；留空为 `instance/codevoyage.db`，也可填 PostgreSQL DSN |
+| `CREDENTIAL_KEY` | 凭据加密主密钥；留空时自动生成并保存到 `instance/credential.key`，**更换后已存凭据将无法解密，请备份** |
+| `MAIL_*` | SMTP 邮件配置，不填则邮件停用（只写日志） |
+
+## 凭据存储
+
+用户的 GitHub Token 与 LLM 配置存于服务端 `credentials` 表，落库前加密（前缀 `f1:` = Fernet，`v1:` = 标准库回退）。
+控制台列表接口只返回脱敏值，明文仅在 `/api/user/credentials/reveal` 返回给已登录的本人。
+
+接口一览：
+
+- `/api/user/credentials/list`　脱敏列表（按顺序即回退顺序）
+- `/api/user/credentials/add`　新增（LLM 需带 `base_url` / `model`；仓库专属令牌带 `repo`）
+- `/api/user/credentials/update`　修改
+- `/api/user/credentials/remove`　删除
+- `/api/user/credentials/move`　上移 / 下移（`direction=up|down`）
+- `/api/user/credentials/reveal`　取回明文（仅本人）

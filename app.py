@@ -200,9 +200,11 @@ def _cred_public(cred: dict) -> dict:
         "created_at": cred["created_at"],
     }
     if cred["kind"] == "llm":
-        extra = cred.get("extra") or {}
+        extra = dict(cred.get("extra") or {})
         item["base_url"] = extra.get("base_url", "")
         item["model"] = extra.get("model", "")
+    else:
+        item["repo"] = (cred.get("extra") or {}).get("repo", "")
     return item
 
 
