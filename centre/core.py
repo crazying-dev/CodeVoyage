@@ -117,6 +117,8 @@ def enqueue_issue(issue: dict) -> dict:
             "pr_url": "",
             "error": "",
             "steps": [],
+            # 已发送的自动回复（通知工作流，Issue #20）：[{kind, target, url, at}]
+            "notified": [],
         }
         tasks.insert(0, task)
         tasks = tasks[:200]
@@ -134,6 +136,26 @@ def _replace(repo_full: str, uid: str, mutator) -> dict | None:
             _write_tasks(repo_full, tasks)
             return t
     return None
+
+
+def note_notification(uid: str, kind: str, target: str = "", url: str = "", text: str = "") -> None:
+    """登记一条已发送的自动回复（通知工作流，Issue #20）。
+
+    写入任务的 notified 列表（控制台任务接口可直接看到「已回复 Issue/PR」）并追加一条
+    步骤记录；找不到任务时静默返回，绝不影响通知发送本身。
+    """
+    repo_full = _repo_of(uid)
+    if not repo_full:
+        return
+
+    def _do(t):
+        t.setdefault("notified", []).append({"kind": kind, "target": target, "url": url,
+                                             "at": _now()})
+        t["notified"] = t["notified"][-50:]
+        if text:
+            t.setdefault("steps", []).append(f"{_now()} {text}")
+
+    _replace(repo_full, uid, _do)
 
 
 def touch_confirm(uid: str) -> dict | None:

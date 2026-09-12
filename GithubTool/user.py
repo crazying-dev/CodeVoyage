@@ -22,6 +22,7 @@ TOKEN_HINTS = {
         "细粒度令牌必须勾选目标仓库（Repository access）",
         "权限需包含：Contents = Read and write、Pull requests = Read and write",
         "修改 .github/workflows 还需要：Workflows = Read and write",
+        "自动回复 Issue（通知工作流）还需要：Issues = Read and write",
         "Metadata = Read（默认自动包含）",
     ],
     "unknown": [
@@ -165,7 +166,8 @@ def friendly_error(err) -> str:
         return (
             "GitHub 拒绝了该操作（403），通常是令牌权限不足。\n"
             "细粒度令牌：需勾选目标仓库，并授予 Contents=Read and write、Pull requests=Read and write、"
-            "Workflows=Read and write（改 .github/workflows 必需）。\n"
+            "Workflows=Read and write（改 .github/workflows 必需）、"
+            "Issues=Read and write（在 Issue 下自动回复通知必需）。\n"
             "传统令牌：需勾选 repo；改 workflow 还需 workflow 权限。\n"
             f"原始信息：{text[:300]}"
         )

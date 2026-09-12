@@ -31,6 +31,7 @@ CodeVoyage是一个通过[`Action Workflow`](https://docs.github.com/zh/actions)
 3. AI处理沙盒运行，不导致AI发疯导致电脑错误
 4. PR合并进主分支后，本次工作分支（`codevoyage/*`）会被自动销毁，仓库分支列表不会堆积
 5. PR若与主分支冲突（例如主分支在任务执行期间前进过），CodeVoyage会自动合并主分支并解决冲突，尽量让PR保持「可合并」
+6. 任务结束会自动回复Issue（PR提交后附带PR链接与结论摘要；失败 / 用户放弃也会给出原因），提交者不必盯着PR列表看结果；若PR存在无法自动安全解决的冲突，回复里会写明原因，避免PR静静停在冲突状态
 
 ---
 
@@ -46,6 +47,9 @@ CodeVoyage是一个通过[`Action Workflow`](https://docs.github.com/zh/actions)
 4. **GitHub 代理默认关闭**：借用他人代连（`enabled`）与「本机作为代连节点」（`as_helper`）默认都不开启；
    开启代连节点必须显式授权（`confirm`），且只允许转发白名单内的公网目标，并限制并发、记录审计日志。
 5. **远端回执脱敏**：回执给服务端的错误信息会去掉本机路径、令牌样式与带凭据的 URL。
+6. **自动回复只写评论且先脱敏**：通知工作流只在 Issue / PR 下写评论，不改代码、不改分支、
+   不关闭 / 不锁定 Issue、不加标签；正文（含结论摘要与失败原因）统一经 `centre.sanitize`
+   去掉本机路径、令牌样式与带凭据 URL，避免把本机信息写到公开页面。
 
 ---
 
@@ -85,6 +89,24 @@ PR冲突自动处理（见Issue #19）：
 5. 手动使用：`pr_conflicts(pr="")` 查看冲突中的 PR；`pr_conflicts(pr=15)` 看单个 PR 详情；
    `resolve_pr_conflicts(pr=15, dry_run=true)` 只看计划；确认后 `resolve_pr_conflicts(pr=15)` 执行
 
+通知工作流（见Issue #20）：
+1. **成功**：任务创建PR后程序自动在Issue下回复一条通知，附PR链接、工作分支（`codevoyage/*` → 默认分支）、
+   **结论摘要**与**PR可合并状态**（含冲突是否已自动解决、没解决的原因）；有PR时同时在PR下留一条同样的通知
+2. **失败**：在Issue下回复，附脱敏后的失败原因与「修正后可再次评论触发词重试」的提示
+3. **放弃**：用户在本机控制台 / 右下角弹窗选择放弃时，在Issue下回复说明本次未改动任何内容
+4. **幂等**：同一任务的同类通知只发一次，记录在`~/.CodeVoyage/Agent/repo/{"仓库作者/仓库名称"的哈希值}/notify.json`；
+   已发送的通知也会写进任务步骤（控制台任务列表可见）
+5. **可关闭**：设置环境变量`CODEVOYAGE_DISABLE_PR_NOTIFY=1`，或在本地配置中设置`pr_notify=false`
+6. **安全约束**：只写评论（不关闭 / 不锁定Issue、不加标签、不改代码与分支）；正文先经`centre.sanitize`
+   脱敏（本机路径、令牌样式、带凭据URL一律替换）；令牌走本仓库（细粒度 → 传统）顺序回退，
+   不需要服务端配合；通知失败只记日志，绝不影响任务结果
+7. 手动使用：AI 在任务过程中可调用`notify_issue(message, issue?, pr?)`在Issue / PR下留言（同样只写评论、先脱敏）
+8. **服务端（`server` 分支）仍需配合的部分**（本次改动只含本地客户端，服务端代码在独立分支，不在本 PR 内）：
+   - 邮件通知（`doc.md` 第④节）：客户端已把结果回传 `/api/Issue/Result`，由服务端负责发信；
+   - PR 事件（合并 / 关闭 / PR 上的评论）触发任务：需要服务端能处理 `issue_number` 为空的 PR 事件 payload，
+     处理不了之前 `workflows/base.yaml` 保持只上报 `issues` / `issue_comment`，避免生成无效任务；
+   - 细粒度令牌若要自动回帖，需额外授予 `Issues = Read and write`（PR 评论需 `Pull requests = Read and write`）
+
 触发关键词（Issue #19 评论）：
 - workflow 里的关键词匹配**不区分大小写、忽略多余空白**：`Ai Run` / `ai run` / `AI RUN` / `Ai  Run` 都能触发；
 - **不限制触发人身份**：任何对该 Issue 有评论权限的人（包括其他合规、维护人员）都可以用关键词唤起 CodeVoyage，
@@ -102,6 +124,7 @@ Agent的工具(每个工具都单独一个文件):
 7. 工作分支清理（`cleanup_branches`）
 8. PR冲突查看（`pr_conflicts`，只读）
 9. PR冲突处理（`resolve_pr_conflicts`）
+10. Issue / PR 通知回复（`notify_issue`，只写评论且先脱敏）
 
 AI返回格式:
 1. 标准Markdown格式
