@@ -164,6 +164,24 @@ tools = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "notify_issue",
+            "description": "在 Issue（或 PR）下回复一条 Markdown 通知，把处理进度或结论同步给 Issue 提交者。只写评论：不改代码、不改分支、不改 Issue 状态（不关闭 / 不锁定 / 不加标签）。正文发送前自动脱敏（本机路径、令牌样式会被替换），因此不要把令牌、密钥或本机绝对路径写进正文。任务结束时的自动回复由程序负责，无需重复发送。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string", "description": "通知正文（Markdown）"},
+                    "issue": {"type": "string", "description": "Issue 编号或链接，留空表示当前任务的 Issue"},
+                    "pr": {"type": "string", "description": "PR 编号或链接，填了会额外在 PR 下留一条同样的通知"},
+                    "repo": {"type": "string", "description": "仓库 owner/name，留空表示当前任务仓库"},
+                },
+                "required": ["message"],
+                "additionalProperties": False,
+            },
+        },
+    },
 ]
 
 # 名称到执行函数的映射（新增工具需同步登记）
@@ -179,4 +197,5 @@ tool_impl = {
     "pr_conflicts": "PrOps.pr_conflicts",
     "resolve_pr_conflicts": "PrOps.resolve_pr_conflicts",
     "cleanup_branches": "BranchCleanup.cleanup_branches",
+    "notify_issue": "NotifyOps.notify_issue",
 }

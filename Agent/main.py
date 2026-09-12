@@ -12,7 +12,10 @@
 8. PR 若与目标分支冲突（主分支在任务期间前进过），自动尝试解决一次
    （centre.pr_conflict，Issue #19）：merge 目标分支 → 解决可安全判定的冲突 →
    校验无残留标记 → 提交推送（绝不 force push）→ 在 PR 下留言；失败只记轨迹不影响任务；
-9. 返回结果由上层回执给远端。
+9. 通知工作流（centre.pr_notify，Issue #20）：任务成功后自动在 Issue（有 PR 时也在 PR）
+   下回复一条通知，附 PR 链接、工作分支、结论摘要与 PR 可合并状态（含冲突是否已自动解决、
+   没解决的原因），失败 / 用户放弃的通知由 Agent 主循环发送；
+10. 返回结果由上层回执给远端。
 
 工作区安全：work 目录名由远端下发的任务 uuid 拼成，注入文件工具之前必须
 （1）用 `paths.safe_name` 清洗 uuid；（2）校验最终路径位于 `paths.REPO_DIR` 之内；
@@ -202,7 +205,11 @@ def run_task(task: dict) -> dict:
 
         # PR 冲突自动处理（Issue #19）：主分支在本次任务期间前进过时，新 PR 会处于冲突状态，
         # 这里由程序兜底解决一次，保证「PR 能合」。失败只记轨迹与日志，不影响任务结果。
-        _auto_resolve_pr_conflicts(repo_full, uid, dest, pr_url)
+        _conflict_text, conflict_result = _auto_resolve_pr_conflicts(repo_full, uid, dest, pr_url)
+
+        # 通知工作流（Issue #20）：PR 提交后自动回复 Issue（附 PR 链接、结论摘要与 PR 可合并
+        # 状态，含冲突是否已自动解决 / 没解决的原因）；只写评论，失败不影响任务结果。
+        _notify_task(task, uid, conclusion, pr_url, conflict_result)
 
         paths.append_log(f"[{repo_full}#{issue_number}] 已完成，PR：{pr_url}")
         trace.finish(repo_full, uid, "ok")
@@ -217,12 +224,15 @@ def run_task(task: dict) -> dict:
         ReadFile.set_workspace("")
 
 
-def _auto_resolve_pr_conflicts(repo_full: str, uid: str, workdir: str, pr_url: str) -> None:
+def _auto_resolve_pr_conflicts(repo_full: str, uid: str, workdir: str, pr_url: str) -> tuple[str, dict]:
     """PR 创建后自动处理与目标分支的冲突（Issue #19）。
 
     只在 PR 确实冲突时动作：merge 目标分支 → 解决可安全判定的冲突 → 校验 → 提交推送
     （绝不 force push）→ 在 PR 下留言。约束（同仓库 codevoyage/* 分支、文件数量/体积上限、
     无法安全判定即回滚）都在 centre.pr_conflict 内实现；任何异常都不允许影响任务结果。
+
+    返回 (轨迹文本, 冲突处理原始结果)；异常时结果为 {}，供通知工作流在自动回复里写清楚
+    「冲突是否已自动解决、没解决的原因」，避免 PR 静静停留在冲突状态而没人知道。
     """
     try:
         from centre import pr_conflict
@@ -232,10 +242,67 @@ def _auto_resolve_pr_conflicts(repo_full: str, uid: str, workdir: str, pr_url: s
     except Exception as e:  # 自动处理绝不能把 Agent 主流程带崩
         trace.append(repo_full, uid, {"type": "note", "content": f"PR 冲突自动处理异常：{e}"})
         paths.append_log(f"[{repo_full}] PR 冲突自动处理异常：{e}")
-        return
+        return f"PR 冲突自动处理异常：{e}", {}
     trace.append(repo_full, uid, {"type": "note", "content": f"PR 冲突自动处理：\n{text}"})
     first = next((line for line in text.splitlines() if line.strip()), "")
     paths.append_log(f"[{repo_full}] PR 冲突自动处理：{first}")
+    return text, result
+
+
+def _conflict_summary(result: dict) -> str:
+    """把 PR 冲突处理结果整理成通知里的一句说明（Issue #20）。
+
+    「PR 有冲突但没自动解决」以前只写在本地日志里，人在 PR 页面看不到原因；这里如实
+    写进自动回复：能解决的会说明已推送，不能安全判定的会说明已回滚、需人工处理。
+    """
+    if not result:
+        return "未检查（自动处理未执行或异常）"
+    if result.get("changed"):
+        after = str(result.get("after") or "unknown")
+        label = {
+            "clean": "可合并",
+            "behind": "落后于目标分支",
+            "unknown": "GitHub 仍在计算合并状态",
+            "conflict": "仍有冲突",
+        }.get(after, after)
+        return f"原存在冲突，已自动合并目标分支并解决（当前：{label}）"
+    if not result.get("ok"):
+        reason = str(result.get("reason") or "").strip()
+        return "自动解决未完成，需人工处理" + (f"：{reason}" if reason else "")
+    reason = str(result.get("reason") or "").strip()
+    return reason[:300] or "无冲突，无需处理"
+
+
+def _notify_task(task: dict, uid: str, conclusion: str, pr_url: str,
+                 conflict_result: dict) -> None:
+    """通知工作流（Issue #20）：任务成功后自动回复 Issue / PR。
+
+    回复内容：PR 链接、工作分支、结论摘要、PR 可合并状态（含冲突未自动解决的原因与
+    处理步骤）。只写评论，不改代码 / 分支；任何异常都不影响任务结果。
+    """
+    from tools import RepoOps
+
+    repo_full = task.get("repo_full") or ""
+    try:
+        from centre import pr_notify
+
+        state = RepoOps.state()
+        info = {
+            "branch": state.get("branch", ""),
+            "base": state.get("default_branch", ""),
+            "conflict": _conflict_summary(conflict_result),
+            "steps": (conflict_result.get("steps") or [])[:8],
+        }
+        result = pr_notify.notify(task, kind="ok", pr_url=pr_url,
+                                  conclusion=conclusion, info=info)
+        text = pr_notify.format_result(result)
+    except Exception as e:  # 通知绝不能影响任务结果
+        trace.append(repo_full, uid, {"type": "note", "content": f"通知发送异常：{e}"})
+        paths.append_log(f"[{repo_full}] 通知发送异常：{e}")
+        return
+    trace.append(repo_full, uid, {"type": "note", "content": f"自动回复（通知工作流）：\n{text}"})
+    first = next((line for line in text.splitlines() if line.strip()), "")
+    paths.append_log(f"[{repo_full}#{task.get('issue_number')}] 通知：{first}")
 
 
 def _session_recap(history: dict) -> str:
