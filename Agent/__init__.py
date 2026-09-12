@@ -18,6 +18,14 @@ import time
 import Agent.main as runner
 from centre import branch_gc, core, notify, paths, remote
 
+# 权限类失败时追加的排查提示（自动回复通知需要对 Issue 有写权限）
+_PERMISSION_HINT = (
+    "\n提示：请检查 GitHub Token 权限。"
+    "传统令牌需勾选 repo（改 workflow 还需 workflow）；"
+    "细粒度令牌需勾选该仓库并授予 Contents / Pull requests / Workflows 读写，"
+    "以及在 Issue 下自动回复通知所需的 Issues 读写。"
+)
+
 
 def _sanitize_error(err, limit: int = 800) -> str:
     """错误信息脱敏：本机路径 / 凭据 → 占位符，并截断长度。
@@ -106,11 +114,7 @@ def main():
                 raw = str(e)
                 err_text = _sanitize_error(raw)
                 if any(k in raw for k in ("Permission", "permission", "403", "denied", "Authentication")):
-                    err_text += (
-                        "\n提示：请检查 GitHub Token 权限。"
-                        "传统令牌需勾选 repo（改 workflow 还需 workflow）；"
-                        "细粒度令牌需勾选该仓库并授予 Contents / Pull requests / Workflows 读写。"
-                    )
+                    err_text += _PERMISSION_HINT
                 core.finish(uid, "failed", error=err_text)
                 # 本机日志保留原文（不出本机），便于排查
                 paths.append_log(
