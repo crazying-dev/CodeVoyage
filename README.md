@@ -101,6 +101,11 @@ PR冲突自动处理（见Issue #19）：
    脱敏（本机路径、令牌样式、带凭据URL一律替换）；令牌走本仓库（细粒度 → 传统）顺序回退，
    不需要服务端配合；通知失败只记日志，绝不影响任务结果
 7. 手动使用：AI 在任务过程中可调用`notify_issue(message, issue?, pr?)`在Issue / PR下留言（同样只写评论、先脱敏）
+8. **服务端（`server` 分支）仍需配合的部分**（本次改动只含本地客户端，服务端代码在独立分支，不在本 PR 内）：
+   - 邮件通知（`doc.md` 第④节）：客户端已把结果回传 `/api/Issue/Result`，由服务端负责发信；
+   - PR 事件（合并 / 关闭 / PR 上的评论）触发任务：需要服务端能处理 `issue_number` 为空的 PR 事件 payload，
+     处理不了之前 `workflows/base.yaml` 保持只上报 `issues` / `issue_comment`，避免生成无效任务；
+   - 细粒度令牌若要自动回帖，需额外授予 `Issues = Read and write`（PR 评论需 `Pull requests = Read and write`）
 
 触发关键词（Issue #19 评论）：
 - workflow 里的关键词匹配**不区分大小写、忽略多余空白**：`Ai Run` / `ai run` / `AI RUN` / `Ai  Run` 都能触发；
