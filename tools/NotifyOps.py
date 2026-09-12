@@ -9,7 +9,9 @@ Issue 提交者 —— 任务结束时的自动回复由程序负责（centre.pr
 - 正文先脱敏（centre.sanitize），本机路径与令牌样式会被替换成占位符，所以不要把令牌、
   密钥或本机绝对路径写进正文；
 - 令牌走本仓库（仓库专属 → 全局）顺序回退；发送失败返回以「错误：」开头的文本，
-  不影响任务本身的结果。
+  不影响任务本身的结果；
+- 发送成功后同样登记到任务（`core.note_notification`），控制台任务列表里能看到
+  「已回复通知」，与程序自动回复的记录一致。
 """
 from centre import pr_notify, sanitize
 from tools import RepoOps
@@ -21,6 +23,20 @@ def _repo(repo: str) -> str:
     if text:
         return text
     return (RepoOps.state().get("repo_full") or "").strip()
+
+
+def _remember(uid: str, sent: list) -> None:
+    """把 AI 主动发送的通知登记到任务步骤（控制台可见）；失败不影响结果。"""
+    uid = str(uid or "").strip()
+    if not uid or not sent:
+        return
+    try:
+        from centre import core
+
+        name, url = sent[0]
+        core.note_notification(uid, "manual", target=name, url=url, text="已回复通知（AI 主动）")
+    except Exception:
+        pass
 
 
 def notify_issue(message: str, issue: str = "", pr: str = "", repo: str = "") -> str:
@@ -46,20 +62,21 @@ def notify_issue(message: str, issue: str = "", pr: str = "", repo: str = "") ->
 
     lines = [f"仓库 {repo_full} 通知："]
     errors = []
-    ok_any = False
+    sent = []
     for name, ref in (("PR", target_pr), ("Issue", target_issue)):
         if not ref:
             continue
         res = pr_notify.reply(repo_full, ref, body)
         if res.get("ok"):
-            ok_any = True
+            sent.append((name, res.get("url") or ""))
             lines.append(f"  - {name} {ref}：已回复 {res.get('url') or ''}".rstrip())
         else:
             errors.append(f"{name} {ref}：{res.get('reason') or '回复失败'}")
             lines.append(f"  - {name} {ref}：失败（{res.get('reason') or '未知原因'}）")
 
-    if not ok_any:
+    if not sent:
         return "错误：通知发送失败：" + "；".join(errors)
+    _remember(state.get("uid"), sent)
     if errors:
         lines.append("说明：部分目标发送失败，可稍后重试；通知失败不影响本次任务结果。")
     return "\n".join(lines)
